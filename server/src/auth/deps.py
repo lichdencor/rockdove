@@ -64,8 +64,9 @@ async def extract_auth(
     # OIDC JWT (human users via Keycloak)
     try:
         payload = verify_token(token)
+        peer_id = payload.get("preferred_username") or payload.get("sub")
         return CallerInfo(
-            peer_id=payload.get("sub"),
+            peer_id=peer_id,
             is_service=False,
             org_id=org_id_from_issuer(payload.get("iss", "")),
             groups=groups_from_payload(payload),

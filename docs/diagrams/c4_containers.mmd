@@ -1,0 +1,104 @@
+%% RockDove — C4 Level 2 — Contenedores
+graph TB
+  UD(["Usuario Desktop"])
+  AO(["Administrador"])
+  EI(["Dispositivo Edge / IoT"])
+  KC["Keycloak
+  OIDC / SSO"]
+
+  subgraph rd["Sistema RockDove"]
+    direction TB
+
+    subgraph frontend["Interfaz de Usuario"]
+      UI["Interfaz Web
+      React SPA · Vite
+      ConnectPage / Dashboard
+      ConfigTab / FileTransfer"]
+      EL["Shell de Escritorio
+      Electron
+      Lanza el agente Python
+      Expone URL via contextBridge"]
+      EL -->|"carga"| UI
+    end
+
+    subgraph servidor["Servidor de Coordinación — Nube"]
+      SRV["Servidor de Coordinación
+      Python / FastAPI
+      :8080
+      Registro de peers · métricas
+      relay lookup · control de acceso"]
+      NEO[("Grafo de Red
+      Neo4j
+      Nodos peer con udp_host / api_url
+      Aristas CONNECTS_TO con
+      peso RTT / jitter / loss")]
+      RED[("Estado Compartido
+      Redis
+      Buffer de métricas (últimas 10)
+      Device tokens · org scopes
+      Peers con TTL de heartbeat")]
+      SRV -->|"lectura / escritura
+      peers y pesos de red"| NEO
+      SRV -->|"lectura / escritura
+      métricas y tokens"| RED
+    end
+
+    subgraph agente["Agente Local — por máquina"]
+      AGT["Agente Local
+      Python / FastAPI
+      :8000 (HTTP API)
+      :9001 (UDP / QUIC)
+      Motor RS · capa de transporte
+      relay · almacenamiento · daemon"]
+      SQ[("Historial Local
+      SQLite
+      Historial de transferencias
+      Índice SHA-256 de archivos recibidos")]
+      AGT -->|"lectura / escritura
+      historial de transferencias"| SQ
+    end
+  end
+
+  subgraph peer2["Agente Remoto (otro peer)"]
+    AGT2["Agente Local
+    Python / FastAPI :8000
+    UDP / QUIC :9001"]
+  end
+
+  UD -->|"usa"| EL
+  AO -->|"gestiona vía HTTP"| SRV
+  EI -->|"HTTP — registro y heartbeat
+  UDP — bloques RS"| AGT
+
+  UI -->|"HTTP 127.0.0.1:8000
+  consulta estado, inicia transferencia"| AGT
+  UI <-->|"WebSocket
+  push de lista de peers en tiempo real"| SRV
+
+  AGT -->|"HTTPS — registro / heartbeat
+  lookup de peers y relay
+  reporte de métricas"| SRV
+  AGT2 -->|"HTTPS — registro / heartbeat
+  lookup de peers y relay
+  reporte de métricas"| SRV
+
+  AGT <-->|"UDP / QUIC directo
+  bloques Reed-Solomon
+  Los archivos NUNCA pasan por el servidor"| AGT2
+
+  SRV -.->|"validación JWT / JWKS"| KC
+
+  style rd fill:#f8fafc,stroke:#475569,color:#000
+  style frontend fill:#eff6ff,stroke:#3b82f6,color:#000
+  style servidor fill:#fff8e1,stroke:#f59e0b,color:#000
+  style agente fill:#f0fdf4,stroke:#22c55e,color:#000
+  style peer2 fill:#faf5ff,stroke:#a855f7,color:#000
+  style SRV fill:#fef3c7,stroke:#d97706,color:#000
+  style AGT fill:#dcfce7,stroke:#16a34a,color:#000
+  style AGT2 fill:#f3e8ff,stroke:#9333ea,color:#000
+  style NEO fill:#fef9c3,stroke:#b45309,color:#000
+  style RED fill:#fee2e2,stroke:#dc2626,color:#000
+  style SQ fill:#e0f2fe,stroke:#0284c7,color:#000
+  style UI fill:#dbeafe,stroke:#1d4ed8,color:#000
+  style EL fill:#c7d2fe,stroke:#4f46e5,color:#000
+  style KC fill:#fef9c3,stroke:#ca8a04,color:#000

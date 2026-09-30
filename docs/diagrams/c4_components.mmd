@@ -1,0 +1,154 @@
+%% RockDove — C4 Level 3 — Componentes
+graph TB
+  subgraph srv["Servidor de Coordinación — Python/FastAPI :8080"]
+    direction TB
+
+    RP["Registro de Peers
+    POST /peers/register
+    POST /peers/{id}/heartbeat
+    GET /peers/{id} · GET /peers/
+    Almacena udp_host, udp_port, api_url
+    Renueva TTL en Neo4j y Redis
+    Difunde cambios por WebSocket"]
+
+    MM["Motor de Métricas
+    POST /metrics/report  recibe RTT/jitter/loss
+    GET /metrics/recommendation/{id}
+    Promedia últimas 10 muestras por peer
+    Mapea calidad → nivel de redundancia
+    excellent → 5%  ·  good → 10%
+    fair → 20%  ·  poor → 35%  ·  critical → 50%"]
+
+    MR["Motor de Relay
+    GET /relay/find/{target_id}
+    Consulta Neo4j por peers relay_capable
+    Filtra por etiqueta: ephemeral / restricted / gateway
+    Devuelve mejor relay según peso de aristas
+    GET /relay/peers  lista todos los relays"]
+
+    CA["Control de Acceso
+    Valida JWT via JWKS de Keycloak
+    Extrae org_id y grupos del token
+    POST /device-tokens  crea token rd_...
+    DELETE /device-tokens/{id}
+    Aplica scopes de visibilidad por grupo
+    Gestiona INCOMING_POLICY por peer"]
+
+    NEO[("Neo4j
+    Grafo de peers
+    Aristas CONNECTS_TO
+    pesos: RTT · jitter · loss")]
+    RED[("Redis
+    Métricas ring buffer
+    Device tokens
+    Org scopes · peers TTL")]
+    KC_EXT["Keycloak
+    JWKS endpoint"]
+
+    RP --> NEO
+    RP --> RED
+    MM --> RED
+    MR --> NEO
+    CA --> RED
+    CA -.->|"GET /.well-known/jwks.json"| KC_EXT
+    RP --- MM
+    RP --- CA
+  end
+
+  subgraph agt["Agente Local — Python/FastAPI :8000 + UDP/QUIC :9001"]
+    direction TB
+
+    RS["Motor Reed-Solomon
+    Divide archivo en bloques de k bytes
+    Codifica a n bytes añadiendo paridad
+    Recupera bloques faltantes por álgebra
+    Verifica integridad con SHA-256
+    Resultado: ok / degraded / failed"]
+
+    TR["Capa de Transporte
+    Abstracción unificada UDP y QUIC
+    UDP: asyncio raw socket
+    QUIC: TLS 1.3 + DATAGRAM frames
+            CERT_HELLO para identidad
+    Buffers de bloques entrantes por transfer_id
+    Cambio de transporte en tiempo de ejecución"]
+
+    PR["Procesador de Relay
+    Actúa cuando relay_capable = true
+    Recibe bloques del emisor en RAM
+    Nunca escribe en disco
+    Notifica al peer destino final
+    Reenvía bloques y espera confirmación
+    Etiquetas: ephemeral · restricted · gateway"]
+
+    GA["Gestor de Almacenamiento
+    Escribe archivos recibidos al sistema de archivos
+    Construye índice SHA-256 por archivo
+    Persiste historial de transferencias en SQLite
+    POST /transfer/receive  inicia recepción
+    GET /transfers  historial local"]
+
+    GC["Gestor de Configuración
+    Lee variables de entorno al iniciar
+    Acepta configuración enviada desde la UI
+    Aplica cambios en tiempo de ejecución
+    INCOMING_POLICY: allow_all / deny_all
+                      allow_list / deny_list
+    PEER_OWNER para agrupación en UI"]
+
+    SD["Servicio de Daemon
+    rs-agent daemon install / start
+                          stop / status / uninstall
+    Linux: systemd user unit
+    macOS: LaunchAgent plist
+    Windows: tarea ONLOGON
+    Permite ejecución en segundo plano"]
+
+    SQ_C[("SQLite
+    Historial local
+    Índice SHA-256")]
+
+    RS --> TR
+    TR --> PR
+    GA --> SQ_C
+    GC --> TR
+    GC --> RS
+    SD --- GC
+  end
+
+  SRV_EXT["Servidor de Coordinación
+  :8080"]
+  AGT_EXT["Agente Remoto
+  :8000 / :9001"]
+  UI_EXT["Interfaz Web
+  React SPA"]
+
+  UI_EXT -->|"HTTP — inicia transferencia
+  consulta estado"| agt
+  TR <-->|"UDP / QUIC
+  bloques RS"| AGT_EXT
+  GA -->|"HTTPS — reporte de métricas
+  registro y heartbeat"| SRV_EXT
+  RS -->|"GET /metrics/recommendation
+  consulta redundancia óptima"| SRV_EXT
+  PR -->|"GET /relay/find/{id}"| SRV_EXT
+
+  style srv fill:#fff8e1,stroke:#f59e0b,color:#000
+  style agt fill:#f0fdf4,stroke:#22c55e,color:#000
+  style NEO fill:#fef9c3,stroke:#b45309,color:#000
+  style RED fill:#fee2e2,stroke:#dc2626,color:#000
+  style SQ_C fill:#e0f2fe,stroke:#0284c7,color:#000
+  style KC_EXT fill:#fef9c3,stroke:#ca8a04,color:#000
+  style SRV_EXT fill:#fef3c7,stroke:#d97706,color:#000
+  style AGT_EXT fill:#f3e8ff,stroke:#9333ea,color:#000
+  style UI_EXT fill:#dbeafe,stroke:#1d4ed8,color:#000
+  style RS fill:#dcfce7,stroke:#15803d,color:#000
+  style TR fill:#dcfce7,stroke:#15803d,color:#000
+  style PR fill:#dcfce7,stroke:#15803d,color:#000
+  style GA fill:#dcfce7,stroke:#15803d,color:#000
+  style GC fill:#dcfce7,stroke:#15803d,color:#000
+  style SD fill:#dcfce7,stroke:#15803d,color:#000
+  style RP fill:#fef3c7,stroke:#d97706,color:#000
+  style MM fill:#fef3c7,stroke:#d97706,color:#000
+  style MR fill:#fef3c7,stroke:#d97706,color:#000
+  style CA fill:#fef3c7,stroke:#d97706,color:#000

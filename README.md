@@ -44,6 +44,7 @@ SERVER_URL=http://localhost:8080
 PEER_ID=peer-alice
 UDP_HOST=0.0.0.0
 UDP_PORT=9001
+# TRANSPORT_MODE=udp  # o quic para TLS 1.3
 ```
 
 ### 2. Levantar el stack del servidor
@@ -160,6 +161,7 @@ docker run --env-file .env -p 8000:8000 -p 9001:9001/udp rs-agent
 | `AGENT_PORT` | `8000` | Puerto HTTP del agente |
 | `UDP_HOST` | `0.0.0.0` | Direccion de escucha UDP |
 | `UDP_PORT` | `9001` | Puerto UDP para transferencias RS |
+| `TRANSPORT_MODE` | `udp` | Protocolo de transporte: `udp` = socket raw, `quic` = aioquic con TLS 1.3 |
 | `STORAGE_PATH` | `~/.local/share/rockdove` | Directorio para archivos almacenados |
 | `NETWORK_HINT` | `auto` | `lan` / `wifi` / `cellular` / `satellite` |
 | `AGENT_SERVICE_TOKEN` | `` | Token de servicio (alternativa al login OIDC) |
@@ -188,6 +190,17 @@ poll GET /transfer/{id}/status ──►
 ```
 
 El servidor central no interviene en la transferencia. Solo provee el directorio de peers y la verificacion de identidad.
+
+### Variante QUIC
+
+Cuando `TRANSPORT_MODE=quic` (variable de entorno del agente), el transport layer usa **aioquic** sobre el mismo puerto UDP. Antes de los bloques RS, el sender emite un datagrama **CERT_HELLO** con su `peer_id` y el SHA-256 de su certificado TLS autogenerado (`CN = rockdove-{PEER_ID}`). El receiver registra la conexion como pendiente y muestra un banner en la UI con los datos del cert. El operador puede **Aceptar** o **Rechazar** la conexion; si no responde en 30 s, se acepta automaticamente.
+
+Endpoints relevantes:
+- `GET /transfer/incoming` — lista conexiones QUIC entrantes pendientes
+- `POST /transfer/incoming/{transfer_id}/accept` — aprueba
+- `POST /transfer/incoming/{transfer_id}/reject` — rechaza y descarta los buffers
+
+Los certificados (RSA-2048, auto-firmados) se generan al primer arranque en `STORAGE_PATH/quic_cert.pem` y se regeneran automaticamente si `PEER_ID` cambia.
 
 ## Tests
 

@@ -1,0 +1,81 @@
+%% RockDove — C4 Level 4 — Flujo de código: Transferencia P2P completa
+sequenceDiagram
+  autonumber
+  participant UI as Interfaz Web
+  participant AE as Agente Emisor
+  participant SRV as Servidor de Coordinación
+  participant AR as Agente Receptor
+  participant REL as Peer Relay
+
+  UI->>AE: POST /transfer/send<br/>{target_peer_id, file_path, transport}
+
+  note over AE,SRV: Consulta de calidad de red (paralela)
+  par Consulta emisor
+    AE->>SRV: GET /metrics/recommendation/{emisor_id}
+    SRV-->>AE: {quality: "fair", redundancy: 0.20}
+  and Consulta receptor
+    AE->>SRV: GET /metrics/recommendation/{receptor_id}
+    SRV-->>AE: {quality: "poor", redundancy: 0.35}
+  end
+  note over AE: Usa el peor caso: redundancia = 35%
+
+  note over AE: Codificación Reed-Solomon
+  AE->>AE: 1. Divide archivo en bloques de k bytes
+  AE->>AE: 2. Codifica: n = k + paridad (35% extra)
+  AE->>AE: 3. Calcula SHA-256 del archivo original
+
+  AE->>SRV: GET /peers/{receptor_id}<br/>Obtiene api_url y udp_host:udp_port del receptor
+  SRV-->>AE: {api_url, udp_host, udp_port}
+
+  AE->>AR: POST /transfer/receive<br/>{transfer_id, n_blocks, sha256, transport, sender_udp}
+
+  alt Receptor accesible directamente
+    AR-->>AE: 200 OK — listo para recibir
+
+    note over AE,AR: Envío de bloques RS por UDP / QUIC
+    loop Para cada bloque RS (n bloques)
+      AE->>AR: DATAGRAM {transfer_id, block_index, payload}
+    end
+
+    note over AR: Decodificación Reed-Solomon
+    AR->>AR: Recolecta bloques recibidos
+    AR->>AR: Recupera bloques faltantes por álgebra
+    AR->>AR: Verifica SHA-256
+    AR->>AR: Escribe archivo en disco (SQLite index)
+
+  else Receptor no accesible — ruta de relay
+    AR-->>AE: timeout / conexión rechazada
+    AE->>SRV: GET /relay/find/{receptor_id}
+    SRV-->>AE: {relay_peer_id, relay_api_url, relay_udp}
+
+    AE->>REL: POST /relay/accept<br/>{transfer_id, final_target_id, n_blocks, sha256}
+    REL-->>AE: 200 OK — relay activo
+
+    loop Para cada bloque RS (n bloques)
+      AE-->>REL: DATAGRAM {transfer_id, block_index, payload}
+    end
+
+    note over REL: Relay almacena bloques en RAM<br/>nunca escribe en disco
+    REL->>AR: POST /transfer/receive<br/>{transfer_id, n_blocks, sha256, relay_mode: true}
+    AR-->>REL: 200 OK
+
+    loop Reenvío del relay al receptor
+      REL-->>AR: DATAGRAM {transfer_id, block_index, payload}
+    end
+
+    AR->>AR: Decodifica RS · verifica SHA-256 · escribe archivo
+  end
+
+  note over AE,AR: Verificación de resultado (polling)
+  loop Hasta obtener resultado o timeout
+    AE->>AR: GET /transfer/{transfer_id}/status
+    AR-->>AE: {status: "processing"}
+  end
+  AR-->>AE: {status: "ok", sha256_match: true}<br/>o "degraded" / "failed"
+
+  note over AE,SRV: Reporte de métricas post-transferencia
+  AE->>SRV: POST /metrics/report<br/>{peer_id: receptor_id, rtt_ms, jitter_ms, loss_pct}
+  SRV-->>AE: 204 No Content
+
+  AE-->>UI: {transfer_id, status, bytes, duration_ms}
+  UI->>UI: Muestra resultado al usuario

@@ -3,6 +3,8 @@ import socket
 from functools import lru_cache
 from pathlib import Path
 
+from typing import Literal
+
 from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
@@ -29,10 +31,41 @@ class Settings(BaseSettings):
     AGENT_PORT: int = 8000
     UDP_HOST: str = "0.0.0.0"
     UDP_PORT: int = 9001
+    # Explicit advertise address for VPN / multi-homed setups.
+    # If empty, auto-detected from the default route.
+    UDP_ADVERTISE_HOST: str = ""
     STORAGE_PATH: str = _default_storage_path()
     NETWORK_HINT: str = "auto"
     AGENT_SERVICE_TOKEN: str = ""
     INVITE_TOKEN: str = ""
+    TRANSPORT_MODE: Literal["udp", "quic"] = "udp"
+
+    # Relay configuration
+    RELAY_CAPABLE: bool = False
+    # Comma-separated tags: "ephemeral" | "restricted" | "gateway"
+    RELAY_TAGS: str = ""
+    # For restricted tag: comma-separated peer_ids allowed to use this relay
+    RELAY_ALLOWED_PEERS: str = ""
+    # For restricted tag: comma-separated groups allowed to use this relay
+    RELAY_ALLOWED_GROUPS: str = ""
+    # For gateway tag: JSON mapping peer_id → {host, port, api_port?}
+    # e.g. '{"satellite-sta-1": {"host": "10.5.0.2", "port": 9001}}'
+    RELAY_STATIC_ROUTES: str = "{}"
+    # For gateway tag: comma-separated peer_ids allowed to use static routes via this relay
+    RELAY_GATEWAY_ALLOWED_PEERS: str = ""
+
+    # Incoming transfer policy (local, applied before server-side policy)
+    # "allow_all"  — accept from everyone
+    # "deny_all"   — reject all incoming transfers
+    # "allow_list" — accept only from INCOMING_ALLOWED_PEERS
+    # "deny_list"  — reject only peers in INCOMING_DENIED_PEERS
+    INCOMING_POLICY: Literal["allow_all", "deny_all", "allow_list", "deny_list"] = "allow_all"
+    INCOMING_ALLOWED_PEERS: str = ""  # comma-separated peer_ids for allow_list
+    INCOMING_DENIED_PEERS: str = ""   # comma-separated peer_ids for deny_list
+
+    # Display name for multi-device grouping in the peer list
+    # Defaults to preferred_username from JWT, or PEER_ID if not set
+    PEER_OWNER: str = ""
 
     model_config = {"env_file": ".env"}
 
@@ -42,14 +75,14 @@ class Settings(BaseSettings):
             self.AGENT_API_URL = f"http://{_detect_local_ip()}:{self.AGENT_PORT}"
         return self
 
-    def advertised_udp_host(self) -> str:
-        """Bind address (0.0.0.0) is invalid as a send target — advertise a reachable IP."""
-        if self.UDP_HOST not in ("0.0.0.0", "::", ""):
-            return self.UDP_HOST
-        # Windows: sending UDP to the LAN IP often doesn't loop back to a local listener.
-        if os.name == "nt":
-            return "127.0.0.1"
-        return _detect_local_ip()
+    @property
+    def udp_advertise_host(self) -> str:
+        """Routable IP to register for UDP — explicit override wins, then auto-detect."""
+        if self.UDP_ADVERTISE_HOST:
+            return self.UDP_ADVERTISE_HOST
+        if self.UDP_HOST in ("0.0.0.0", "::"):
+            return _detect_local_ip()
+        return self.UDP_HOST
 
 
 @lru_cache

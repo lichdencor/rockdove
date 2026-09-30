@@ -51,13 +51,15 @@ async def rtt_probe_loop() -> None:
             if not peer.get("online"):
                 continue
             api_url = peer.get("api_url", "")
-            if not api_url:
+            target_peer_id = peer.get("peer_id")
+            if not api_url or not target_peer_id:
                 continue
             try:
                 rtt_ms, jitter_ms = await _probe_rtt(api_url)
                 if rtt_ms > 0:
                     await server_client.report_metrics(
                         settings.PEER_ID,
+                        target_peer_id=target_peer_id,
                         rtt_ms=rtt_ms,
                         jitter_ms=jitter_ms,
                         loss_rate=0.0,

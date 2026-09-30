@@ -1,13 +1,21 @@
 import type {
+  AgentConfig,
   AuthConfig,
+  ConfigUpdateResponse,
   DeviceTokenCreate,
   DeviceTokenInfo,
   FileMetadata,
+  IncomingConnection,
+  IncomingPolicyConfig,
   InviteInfo,
+  MetricHistory,
+  NetworkGraph,
   PeerInfo,
+  RelayConfig,
   RecommendationResponse,
   ScopeConfig,
   TransferResult,
+  TransportRequest,
 } from "./types";
 
 declare global {
@@ -16,6 +24,12 @@ declare global {
       baseUrl: string;
       openExternal?: (url: string) => void;
       onOidcCallback?: (callback: (url: string) => void) => void;
+      winMinimize?: () => void;
+      winMaximize?: () => void;
+      winClose?: () => void;
+      onMaximizeChange?: (callback: (isMaximized: boolean) => void) => void;
+      getLoginItemEnabled?: () => Promise<boolean>;
+      setLoginItemEnabled?: (enabled: boolean) => Promise<void>;
     };
   }
 }
@@ -69,6 +83,11 @@ export const serverApi = {
       (r) => json<ScopeConfig>(r)
     ),
 
+  listPeers: () =>
+    fetch(`${getServerUrl()}/peers`, { headers: authHeaders() }).then((r) =>
+      json<PeerInfo[]>(r)
+    ),
+
   setScopes: (cfg: ScopeConfig) =>
     fetch(`${getServerUrl()}/peers/scopes`, {
       method: "PUT",
@@ -103,6 +122,45 @@ export const serverApi = {
     const url = token ? `${base}?token=${encodeURIComponent(token)}` : base;
     return new WebSocket(url);
   },
+
+  getPeerMetrics: (peerId: string) =>
+    fetch(`${getServerUrl()}/peers/${peerId}/metrics`, {
+      headers: authHeaders(),
+    }).then((r) => json<{ raw: string }>(r)),
+
+  getMetricHistory: (peerId: string) =>
+    fetch(`${getServerUrl()}/metrics/history/${peerId}`, {
+      headers: authHeaders(),
+    }).then((r) => json<MetricHistory>(r)),
+
+  getNetworkGraph: () =>
+    fetch(`${getServerUrl()}/metrics/network-graph`, {
+      headers: authHeaders(),
+    }).then((r) => json<NetworkGraph>(r)),
+
+  getRelayPeer: (targetId: string) =>
+    fetch(`${getServerUrl()}/peers/relay?target=${encodeURIComponent(targetId)}`, {
+      headers: authHeaders(),
+    }).then((r) => json<PeerInfo>(r)),
+
+  updateRelayConfig: (peerId: string, cfg: RelayConfig) =>
+    fetch(`${getServerUrl()}/peers/${encodeURIComponent(peerId)}/relay-config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(cfg),
+    }).then((r) => json<{ status: string; peer_id: string }>(r)),
+
+  getIncomingPolicy: (peerId: string) =>
+    fetch(`${getServerUrl()}/peers/${encodeURIComponent(peerId)}/incoming-policy`, {
+      headers: authHeaders(),
+    }).then((r) => json<IncomingPolicyConfig>(r)),
+
+  updateIncomingPolicy: (peerId: string, cfg: IncomingPolicyConfig) =>
+    fetch(`${getServerUrl()}/peers/${encodeURIComponent(peerId)}/incoming-policy`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(cfg),
+    }).then((r) => json<{ status: string; peer_id: string }>(r)),
 };
 
 // ── Agent API (data plane) ────────────────────────────────────────────────────
@@ -115,7 +173,7 @@ export const agentApi = {
     fetch(`${getAgentUrl()}/auth/token`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, server_url: getServerUrl() }),
     }).then((r) => json<{ ok: boolean }>(r)),
 
   // Files
@@ -147,7 +205,7 @@ export const agentApi = {
     ),
 
   // Transfers
-  sendFile: (fileId: string, targetPeerId: string, redundancyLevel?: number) =>
+  sendFile: (fileId: string, targetPeerId: string, redundancyLevel?: number, transport?: "udp" | "quic") =>
     fetch(`${getAgentUrl()}/transfer/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -155,6 +213,7 @@ export const agentApi = {
         file_id: fileId,
         target_peer_id: targetPeerId,
         redundancy_level: redundancyLevel ?? null,
+        transport: transport ?? null,
       }),
     }).then((r) => json<TransferResult>(r)),
 
@@ -162,4 +221,55 @@ export const agentApi = {
     fetch(`${getAgentUrl()}/transfer/`, { headers: authHeaders() }).then((r) =>
       json<TransferResult[]>(r)
     ),
+
+  // Incoming QUIC connections
+  listIncoming: () =>
+    fetch(`${getAgentUrl()}/transfer/incoming`, { headers: authHeaders() }).then((r) =>
+      json<IncomingConnection[]>(r)
+    ),
+
+  acceptIncoming: (transferId: string) =>
+    fetch(`${getAgentUrl()}/transfer/incoming/${transferId}/accept`, {
+      method: "POST",
+      headers: authHeaders(),
+    }).then((r) => json<{ ok: boolean }>(r)),
+
+  rejectIncoming: (transferId: string) =>
+    fetch(`${getAgentUrl()}/transfer/incoming/${transferId}/reject`, {
+      method: "POST",
+      headers: authHeaders(),
+    }).then((r) => json<{ ok: boolean }>(r)),
+
+  // Config
+  getConfig: () =>
+    fetch(`${getAgentUrl()}/config`).then((r) => json<AgentConfig>(r)),
+
+  setConfig: (cfg: Partial<AgentConfig>) =>
+    fetch(`${getAgentUrl()}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cfg),
+    }).then((r) => json<ConfigUpdateResponse>(r)),
+
+  // Transport negotiation
+  requestTransport: (targetPeerId: string, transport: "udp" | "quic") =>
+    fetch(
+      `${getAgentUrl()}/transfer/request-transport?target_peer_id=${encodeURIComponent(targetPeerId)}&requested_transport=${transport}`,
+      { method: "POST" }
+    ).then((r) => json<{ request_id: string }>(r)),
+
+  listTransportRequests: () =>
+    fetch(`${getAgentUrl()}/transfer/transport-requests`).then(
+      (r) => json<TransportRequest[]>(r)
+    ),
+
+  acceptTransportRequest: (reqId: string) =>
+    fetch(`${getAgentUrl()}/transfer/transport-requests/${reqId}/accept`, {
+      method: "POST",
+    }).then((r) => json<{ ok: boolean; transport_mode: string }>(r)),
+
+  rejectTransportRequest: (reqId: string) =>
+    fetch(`${getAgentUrl()}/transfer/transport-requests/${reqId}/reject`, {
+      method: "POST",
+    }).then((r) => json<{ ok: boolean }>(r)),
 };

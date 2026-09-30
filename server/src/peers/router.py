@@ -23,6 +23,7 @@ WebSocket /peers/watch:
 """
 import asyncio
 import json
+import httpx
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
@@ -32,6 +33,7 @@ from auth.deps import CallerInfo, extract_auth
 from config import get_settings
 from invites.router import validate_invite
 from redis_client import get_redis
+from neo4j_client import get_neo4j
 
 router = APIRouter()
 
@@ -48,6 +50,10 @@ class PeerRegistration(BaseModel):
     network_hint: str = "auto"
     group: str = "default"
     invite_token: str | None = None
+    transport: str = "udp"  # "udp" | "quic"
+    relay_capable: bool = False
+    relay_tags: list[str] = []  # "ephemeral" | "restricted" | "gateway"
+    owner: str | None = None    # display name for multi-device grouping
 
 
 class PeerInfo(BaseModel):
@@ -59,6 +65,25 @@ class PeerInfo(BaseModel):
     online: bool
     group: str = "default"
     org_id: str = "dev"
+    transport: str = "udp"  # "udp" | "quic"
+    relay_capable: bool = False
+    relay_tags: list[str] = []
+    owner: str | None = None
+    # Server-admin-configured incoming policy (for headless peers)
+    incoming_policy: str = "allow_all"
+    incoming_allowed_peers: list[str] = []
+
+
+class RelayConfig(BaseModel):
+    relay_capable: bool
+    relay_tags: list[str] = []
+    relay_allowed_peers: list[str] = []
+    relay_allowed_groups: list[str] = []
+
+
+class IncomingPolicyConfig(BaseModel):
+    incoming_policy: str = "allow_all"  # "allow_all"|"deny_all"|"allow_list"
+    incoming_allowed_peers: list[str] = []
 
 
 class ScopeConfig(BaseModel):
@@ -108,29 +133,56 @@ async def _visible_groups(
 
 # ── Redis snapshot ────────────────────────────────────────────────────────────
 
+def _compute_online(last_seen_iso: str, timeout_s: int) -> bool:
+    """Returns True if last_seen is within timeout_s seconds of now."""
+    try:
+        last_seen = datetime.fromisoformat(last_seen_iso)
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - last_seen).total_seconds() < timeout_s
+    except Exception:
+        return False
+
+
 async def _snapshot(org_id: str, caller: CallerInfo) -> list[dict]:
-    r = get_redis()
+    driver = get_neo4j()
     scope = await _get_scope(org_id)
     visible = await _visible_groups(caller, scope)
+    timeout_s = get_settings().HEARTBEAT_TIMEOUT_S
 
+    query = (
+        "MATCH (p:Peer {org_id: $org_id}) "
+        "RETURN p"
+    )
+    
     result = []
-    async for key in r.scan_iter(f"peer:{org_id}:*"):
-        data = await r.hgetall(key)
-        if not data:
-            continue
-        peer_group = data.get("group", "default")
-        if visible is not None and peer_group not in visible:
-            continue
-        result.append({
-            "peer_id": data["peer_id"],
-            "api_url": data["api_url"],
-            "udp_host": data["udp_host"],
-            "udp_port": int(data["udp_port"]),
-            "last_seen": data["last_seen"],
-            "online": True,
-            "group": peer_group,
-            "org_id": org_id,
-        })
+    async with driver.session() as session:
+        records = await session.run(query, org_id=org_id)
+        async for record in records:
+            p = record["p"]
+            peer_group = p.get("group", "default")
+            if visible is not None and peer_group not in visible:
+                continue
+            
+            last_seen = p.get("last_seen", "")
+            relay_tags_raw = p.get("relay_tags", "")
+            allowed_raw = p.get("incoming_allowed_peers", "")
+            result.append({
+                "peer_id": p["peer_id"],
+                "api_url": p["api_url"],
+                "udp_host": p["udp_host"],
+                "udp_port": int(p["udp_port"]),
+                "last_seen": last_seen,
+                "online": _compute_online(last_seen, timeout_s),
+                "group": peer_group,
+                "org_id": org_id,
+                "transport": p.get("transport", "udp"),
+                "relay_capable": p.get("relay_capable", False),
+                "relay_tags": relay_tags_raw.split(",") if relay_tags_raw else [],
+                "owner": p.get("owner") or None,
+                "incoming_policy": p.get("incoming_policy", "allow_all"),
+                "incoming_allowed_peers": allowed_raw.split(",") if allowed_raw else [],
+            })
     return result
 
 
@@ -176,22 +228,49 @@ async def register(
     effective_group = (
         caller.groups[0] if (settings.OIDC_ENABLED and caller.groups) else reg.group
     )
+    # Owner: in OIDC mode use the caller identity (preferred_username = peer_id for human users)
+    # In dev mode use the registration body, fallback to peer_id
+    effective_owner = (
+        caller.peer_id if (settings.OIDC_ENABLED and caller.peer_id) else (reg.owner or effective_peer_id)
+    )
 
-    r = get_redis()
+    driver = get_neo4j()
     now = datetime.now(timezone.utc).isoformat()
-    ttl = settings.HEARTBEAT_TTL_S
-    key = f"peer:{caller.org_id}:{effective_peer_id}"
-    await r.hset(key, mapping={
-        "peer_id": effective_peer_id,
-        "api_url": reg.api_url,
-        "udp_host": reg.udp_host,
-        "udp_port": str(reg.udp_port),
-        "last_seen": now,
-        "network_hint": reg.network_hint,
-        "group": effective_group,
-        "org_id": caller.org_id,
-    })
-    await r.expire(key, ttl)
+
+    query = (
+        "MERGE (p:Peer {peer_id: $peer_id, org_id: $org_id}) "
+        "SET p += { "
+        "  api_url: $api_url, "
+        "  udp_host: $udp_host, "
+        "  udp_port: $udp_port, "
+        "  last_seen: $last_seen, "
+        "  network_hint: $network_hint, "
+        "  group: $group, "
+        "  transport: $transport, "
+        "  relay_capable: $relay_capable, "
+        "  relay_tags: $relay_tags, "
+        "  owner: $owner "
+        "} "
+        "RETURN p"
+    )
+
+    async with driver.session() as session:
+        await session.run(
+            query,
+            peer_id=effective_peer_id,
+            org_id=caller.org_id,
+            api_url=reg.api_url,
+            udp_host=reg.udp_host,
+            udp_port=reg.udp_port,
+            last_seen=now,
+            network_hint=reg.network_hint,
+            group=effective_group,
+            transport=reg.transport,
+            relay_capable=reg.relay_capable,
+            relay_tags=",".join(reg.relay_tags),
+            owner=effective_owner,
+        )
+
     await _broadcast(caller.org_id, caller)
     return PeerInfo(
         peer_id=effective_peer_id,
@@ -202,6 +281,10 @@ async def register(
         online=True,
         group=effective_group,
         org_id=caller.org_id,
+        transport=reg.transport,
+        relay_capable=reg.relay_capable,
+        relay_tags=reg.relay_tags,
+        owner=effective_owner,
     )
 
 
@@ -210,13 +293,20 @@ async def heartbeat(
     peer_id: str,
     caller: CallerInfo = Depends(extract_auth),
 ) -> dict:
-    r = get_redis()
-    key = f"peer:{caller.org_id}:{peer_id}"
-    if not await r.exists(key):
-        raise HTTPException(404, "Peer not registered")
+    driver = get_neo4j()
     now = datetime.now(timezone.utc).isoformat()
-    await r.hset(key, "last_seen", now)
-    await r.expire(key, get_settings().HEARTBEAT_TTL_S)
+    
+    query = (
+        "MATCH (p:Peer {peer_id: $peer_id, org_id: $org_id}) "
+        "SET p.last_seen = $now "
+        "RETURN p"
+    )
+    
+    async with driver.session() as session:
+        result = await session.run(query, peer_id=peer_id, org_id=caller.org_id, now=now)
+        if not await result.single():
+            raise HTTPException(404, "Peer not registered")
+
     await _broadcast(caller.org_id, caller)
     return {"status": "ok"}
 
@@ -249,25 +339,223 @@ async def set_scopes(
     return body
 
 
+@router.get("/relay", response_model=PeerInfo)
+async def get_relay_peer(
+    target: str,
+    caller: CallerInfo = Depends(extract_auth),
+) -> PeerInfo:
+    """Return the best available relay peer to reach `target` (relay_capable=true, same org, online)."""
+    driver = get_neo4j()
+    timeout_s = get_settings().HEARTBEAT_TIMEOUT_S
+    query = (
+        "MATCH (p:Peer {org_id: $org_id}) "
+        "WHERE p.relay_capable = true "
+        "  AND p.peer_id <> $target "
+        "  AND p.peer_id <> $caller "
+        "RETURN p ORDER BY p.last_seen DESC LIMIT 1"
+    )
+    async with driver.session() as session:
+        result = await session.run(
+            query,
+            org_id=caller.org_id,
+            target=target,
+            caller=caller.peer_id or "",
+        )
+        record = await result.single()
+        if not record:
+            raise HTTPException(404, "No relay peer available")
+        p = record["p"]
+        last_seen = p.get("last_seen", "")
+        if not _compute_online(last_seen, timeout_s):
+            raise HTTPException(404, "No online relay peer available")
+        relay_tags_raw = p.get("relay_tags", "")
+        return PeerInfo(
+            peer_id=p["peer_id"],
+            api_url=p["api_url"],
+            udp_host=p["udp_host"],
+            udp_port=int(p["udp_port"]),
+            last_seen=last_seen,
+            online=True,
+            group=p.get("group", "default"),
+            org_id=caller.org_id,
+            transport=p.get("transport", "udp"),
+            relay_capable=True,
+            relay_tags=relay_tags_raw.split(",") if relay_tags_raw else [],
+        )
+
+
+@router.get("/{peer_id}/incoming-policy")
+async def get_incoming_policy(
+    peer_id: str,
+    caller: CallerInfo = Depends(extract_auth),
+) -> dict:
+    """Return the admin-configured incoming transfer policy for a peer."""
+    driver = get_neo4j()
+    query = (
+        "MATCH (p:Peer {peer_id: $peer_id, org_id: $org_id}) "
+        "RETURN p.incoming_policy AS policy, p.incoming_allowed_peers AS allowed"
+    )
+    async with driver.session() as session:
+        result = await session.run(query, peer_id=peer_id, org_id=caller.org_id)
+        record = await result.single()
+        if not record:
+            raise HTTPException(404, "Peer not found")
+        allowed_raw = record["allowed"] or ""
+        return {
+            "incoming_policy": record["policy"] or "allow_all",
+            "incoming_allowed_peers": [p for p in allowed_raw.split(",") if p],
+        }
+
+
+@router.post("/{peer_id}/incoming-policy")
+async def update_incoming_policy(
+    peer_id: str,
+    body: IncomingPolicyConfig,
+    caller: CallerInfo = Depends(extract_auth),
+) -> dict:
+    """Admin-only: set the incoming transfer policy for a peer (typically a headless agent)."""
+    if get_settings().OIDC_ENABLED and not caller.is_admin:
+        raise HTTPException(403, "Admin required")
+    driver = get_neo4j()
+    query = (
+        "MATCH (p:Peer {peer_id: $peer_id, org_id: $org_id}) "
+        "SET p.incoming_policy = $policy, "
+        "    p.incoming_allowed_peers = $allowed "
+        "RETURN p.peer_id AS peer_id"
+    )
+    async with driver.session() as session:
+        result = await session.run(
+            query,
+            peer_id=peer_id,
+            org_id=caller.org_id,
+            policy=body.incoming_policy,
+            allowed=",".join(body.incoming_allowed_peers),
+        )
+        record = await result.single()
+        if not record:
+            raise HTTPException(404, "Peer not found")
+    await _broadcast(caller.org_id, caller)
+    return {"status": "ok", "peer_id": peer_id}
+
+
+@router.post("/{peer_id}/relay-config")
+async def update_relay_config(
+    peer_id: str,
+    body: RelayConfig,
+    caller: CallerInfo = Depends(extract_auth),
+) -> dict:
+    """Admin-only: configure relay settings for a peer (overrides the peer's self-declared values)."""
+    if get_settings().OIDC_ENABLED and not caller.is_admin:
+        raise HTTPException(403, "Admin required")
+    driver = get_neo4j()
+    query = (
+        "MATCH (p:Peer {peer_id: $peer_id, org_id: $org_id}) "
+        "SET p.relay_capable = $relay_capable, "
+        "    p.relay_tags = $relay_tags, "
+        "    p.relay_allowed_peers = $relay_allowed_peers, "
+        "    p.relay_allowed_groups = $relay_allowed_groups "
+        "RETURN p.peer_id as peer_id"
+    )
+    async with driver.session() as session:
+        result = await session.run(
+            query,
+            peer_id=peer_id,
+            org_id=caller.org_id,
+            relay_capable=body.relay_capable,
+            relay_tags=",".join(body.relay_tags),
+            relay_allowed_peers=",".join(body.relay_allowed_peers),
+            relay_allowed_groups=",".join(body.relay_allowed_groups),
+        )
+        record = await result.single()
+        if not record:
+            raise HTTPException(404, "Peer not found")
+    await _broadcast(caller.org_id, caller)
+    return {"status": "ok", "peer_id": peer_id}
+
+
 @router.get("/{peer_id}", response_model=PeerInfo)
 async def get_peer(
     peer_id: str,
     caller: CallerInfo = Depends(extract_auth),
 ) -> PeerInfo:
-    r = get_redis()
-    data = await r.hgetall(f"peer:{caller.org_id}:{peer_id}")
-    if not data:
-        raise HTTPException(404, "Peer not found")
-    return PeerInfo(
-        peer_id=data["peer_id"],
-        api_url=data["api_url"],
-        udp_host=data["udp_host"],
-        udp_port=int(data["udp_port"]),
-        last_seen=data["last_seen"],
-        online=True,
-        group=data.get("group", "default"),
-        org_id=data.get("org_id", caller.org_id),
+    driver = get_neo4j()
+    query = (
+        "MATCH (p:Peer {peer_id: $peer_id, org_id: $org_id}) "
+        "RETURN p"
     )
+    async with driver.session() as session:
+        result = await session.run(query, peer_id=peer_id, org_id=caller.org_id)
+        record = await result.single()
+        if not record:
+            raise HTTPException(404, "Peer not found")
+        
+        p = record["p"]
+        last_seen = p.get("last_seen", "")
+        relay_tags_raw = p.get("relay_tags", "")
+        allowed_raw = p.get("incoming_allowed_peers", "")
+        return PeerInfo(
+            peer_id=p["peer_id"],
+            api_url=p["api_url"],
+            udp_host=p["udp_host"],
+            udp_port=int(p["udp_port"]),
+            last_seen=last_seen,
+            online=_compute_online(last_seen, get_settings().HEARTBEAT_TIMEOUT_S),
+            group=p.get("group", "default"),
+            org_id=p.get("org_id", caller.org_id),
+            transport=p.get("transport", "udp"),
+            relay_capable=p.get("relay_capable", False),
+            relay_tags=relay_tags_raw.split(",") if relay_tags_raw else [],
+            owner=p.get("owner") or None,
+            incoming_policy=p.get("incoming_policy", "allow_all"),
+            incoming_allowed_peers=[x for x in allowed_raw.split(",") if x] if allowed_raw else [],
+        )
+
+
+@router.delete("/{peer_id}")
+async def delete_peer(
+    peer_id: str,
+    caller: CallerInfo = Depends(extract_auth),
+) -> dict:
+    if get_settings().OIDC_ENABLED and not caller.is_admin:
+        raise HTTPException(403, "Admin required")
+    
+    driver = get_neo4j()
+    query = (
+        "MATCH (p:Peer {peer_id: $peer_id, org_id: $org_id}) "
+        "DETACH DELETE p"
+    )
+    async with driver.session() as session:
+        await session.run(query, peer_id=peer_id, org_id=caller.org_id)
+    
+    await _broadcast(caller.org_id, caller)
+    return {"status": "ok"}
+
+
+@router.get("/{peer_id}/metrics")
+async def get_peer_metrics(
+    peer_id: str,
+    caller: CallerInfo = Depends(extract_auth),
+) -> dict:
+    """Proxy Prometheus metrics from the agent to the UI."""
+    driver = get_neo4j()
+    query = "MATCH (p:Peer {peer_id: $peer_id, org_id: $org_id}) RETURN p.api_url as api_url"
+    async with driver.session() as session:
+        result = await session.run(query, peer_id=peer_id, org_id=caller.org_id)
+        record = await result.single()
+        if not record:
+            raise HTTPException(404, "Peer not found")
+        api_url = record["api_url"]
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+            # We fetch from the agent's /metrics/ endpoint (trailing slash often required by mount)
+            # Use rstrip('/') + '/metrics/' to ensure we don't end up with //
+            target_url = f"{api_url.rstrip('/')}/metrics/"
+            r = await client.get(target_url)
+            r.raise_for_status()
+            return {"raw": r.text}
+    except Exception as e:
+        raise HTTPException(502, f"Failed to fetch metrics from agent: {str(e)}")
 
 
 @router.websocket("/watch")

@@ -6,10 +6,11 @@ interface Props {
 }
 
 const STATUS_CONFIG = {
-  ok: { icon: "✅", label: "ok", color: "text-emerald-400", bg: "bg-emerald-950/30 border-emerald-900" },
-  degraded: { icon: "⚠️", label: "degraded", color: "text-yellow-400", bg: "bg-yellow-950/30 border-yellow-900" },
-  failed: { icon: "❌", label: "failed", color: "text-red-400", bg: "bg-red-950/30 border-red-900" },
-  pending: { icon: "⏳", label: "pending", color: "text-slate-400", bg: "bg-slate-800/30 border-slate-700" },
+  ok:      { icon: "✅", label: "ok",      color: "text-emerald-400", bg: "bg-emerald-950/30 border-emerald-900" },
+  degraded:{ icon: "⚠️", label: "degraded",color: "text-yellow-400",  bg: "bg-yellow-950/30 border-yellow-900" },
+  failed:  { icon: "❌", label: "failed",  color: "text-red-400",     bg: "bg-red-950/30 border-red-900" },
+  pending: { icon: "⏳", label: "pending", color: "text-slate-400",   bg: "bg-slate-800/30 border-slate-700" },
+  relayed: { icon: "↗️", label: "relayed", color: "text-brand-400",   bg: "bg-brand-950/30 border-brand-900" },
 };
 
 export default function TransferHistory({ transfers }: Props) {
@@ -45,7 +46,15 @@ export default function TransferHistory({ transfers }: Props) {
                       RS recuperó {t.recovered_blocks}/{t.total_blocks} bloques
                     </span>
                   )}
-                  {t.reason && (
+                  {t.via_relay && t.relay_target && (
+                    <span className="text-xs text-brand-500 font-mono">
+                      via relay → {t.relay_target}
+                    </span>
+                  )}
+                  {t.relay_tag && (
+                    <span className="text-[10px] text-slate-600 font-mono">[{t.relay_tag}]</span>
+                  )}
+                  {t.reason && !t.via_relay && (
                     <span className="text-xs text-slate-500">{t.reason}</span>
                   )}
                 </div>

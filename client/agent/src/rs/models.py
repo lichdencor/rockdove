@@ -7,6 +7,7 @@ class TransferStatus(str, Enum):
     degraded = "degraded"
     failed = "failed"
     pending = "pending"
+    relayed = "relayed"
 
 
 @dataclass

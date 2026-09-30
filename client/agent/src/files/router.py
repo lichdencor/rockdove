@@ -35,10 +35,12 @@ async def download_file(file_id: str) -> Response:
     data = _storage().get_bytes(file_id)
     if data is None:
         raise HTTPException(404, "File not found")
+    meta = _storage().get_meta(file_id)
+    filename = (meta or {}).get("filename") or file_id
     return Response(
         content=data,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{file_id}"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

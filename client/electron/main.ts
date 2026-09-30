@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain } from "electron";
+import { app, BrowserWindow, shell, ipcMain, IpcMainInvokeEvent } from "electron";
 import { spawn, ChildProcess } from "child_process";
 import * as path from "path";
 import * as http from "http";
@@ -10,6 +10,25 @@ let mainWindow: BrowserWindow | null = null;
 // Handle opening URLs in the system browser
 ipcMain.on("open-external", (_event, url) => {
   shell.openExternal(url);
+});
+
+ipcMain.on("win-minimize", () => mainWindow?.minimize());
+ipcMain.on("win-maximize", () => {
+  if (mainWindow?.isMaximized()) mainWindow?.unmaximize();
+  else mainWindow?.maximize();
+});
+ipcMain.on("win-close", () => mainWindow?.close());
+
+ipcMain.handle("get-login-item", (_event: IpcMainInvokeEvent): boolean => {
+  return app.getLoginItemSettings().openAtLogin;
+});
+
+ipcMain.handle("set-login-item", (_event: IpcMainInvokeEvent, enabled: boolean): void => {
+  app.setLoginItemSettings({
+    openAtLogin: enabled,
+    openAsHidden: true,
+    name: "RockDove",
+  });
 });
 
 function resolveAgent(): { cmd: string; args: string[]; cwd: string } {
@@ -64,6 +83,8 @@ function createWindow(): void {
     height: 800,
     show: false,
     title: "RockDove",
+    frame: false,
+    titleBarStyle: "hidden",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -108,6 +129,8 @@ if (!gotTheLock) {
       console.error("[main]", err);
     }
     createWindow();
+    mainWindow?.on("maximize", () => mainWindow?.webContents.send("win-maximized", true));
+    mainWindow?.on("unmaximize", () => mainWindow?.webContents.send("win-maximized", false));
   });
 }
 

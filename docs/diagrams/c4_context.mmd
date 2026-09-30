@@ -1,0 +1,47 @@
+%% RockDove — C4 Level 1 — Contexto del Sistema
+graph TB
+  subgraph actores["Actores Externos"]
+    UD["Usuario Desktop
+    Desarrollador o usuario final
+    con RockDove instalado en
+    su computadora"]
+    AO["Administrador de Organización
+    Gestiona peers, scopes de grupo
+    y políticas de entrada/salida"]
+    EI["Dispositivo Edge / IoT
+    Nodo headless sin interfaz gráfica
+    autenticado con device token"]
+  end
+
+  RD["RockDove
+  Sistema de transferencia de archivos
+  peer-to-peer con corrección de errores
+  Reed-Solomon (FEC)
+  ─────────────────────────────
+  Control: nube · Python/FastAPI :8080
+  Datos: agente local por máquina
+  Transporte: UDP / QUIC directo
+  Los archivos NUNCA pasan por el servidor"]
+
+  KC["Keycloak
+  Proveedor de identidad externo
+  OIDC / SSO / PKCE
+  Gestión de realms y grupos"]
+
+  UD -->|"Enviar / recibir archivos
+  Ver estado de peers
+  Configurar transporte"| RD
+  AO -->|"Administrar peers y grupos
+  Definir políticas de acceso
+  Gestionar tokens de dispositivo"| RD
+  EI -->|"Registrarse y transferir archivos
+  Autenticación con device token (rd_...)"| RD
+  RD -.->|"Validación de identidad OIDC
+  Extracción de org_id y grupos"| KC
+
+  style RD fill:#dbeafe,stroke:#1d4ed8,color:#000
+  style KC fill:#fef9c3,stroke:#ca8a04,color:#000
+  style actores fill:#f9fafb,stroke:#6b7280,color:#000
+  style UD fill:#f0fdf4,stroke:#16a34a,color:#000
+  style AO fill:#fdf4ff,stroke:#9333ea,color:#000
+  style EI fill:#fff7ed,stroke:#ea580c,color:#000
