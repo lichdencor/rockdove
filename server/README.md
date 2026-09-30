@@ -48,6 +48,10 @@ WS   /peers/watch?token=<jwt>            real-time peer list stream
 POST /metrics/report                     ingest a MetricReport from an agent
 GET  /metrics/recommendation/{peer_id}  compute redundancy recommendation
 
+GET  /jev/status                         Jev availability + config
+GET  /jev/transit/{source}/{target}     redundancy degree + relay decision
+POST /jev/mock/seed[/{scenario}]         seed mock metrics between two hosts
+
 POST /invites/                           create a single-use invite token
 ```
 
@@ -74,6 +78,12 @@ src/
 │   ├── recommender.py   quality bands + network profile floors → redundancy level
 │   └── router.py        /report and /recommendation/{peer_id} endpoints
 │
+├── jev/
+│   ├── client.py        async httpx client for OpenRouter Decisions API
+│   ├── decider.py       build state+questions, call Jev, confidence gate + fallback
+│   ├── mock.py          seed telemetry between two hosts + relays (dev)
+│   └── router.py        /status, /transit/{source}/{target}, /mock/seed
+│
 └── invites/
     ├── models.py        InviteCreate, InviteInfo
     └── router.py        JWT creation, Redis state machine, validate_invite()
@@ -93,6 +103,10 @@ src/
 | `OIDC_ADMIN_GROUP` | `admin` | Group name whose members have admin privileges |
 | `INVITE_SECRET` | `change-me-in-production` | HS256 key for invite JWTs |
 | `AGENT_SERVICE_TOKEN` | `` | Static Bearer token for headless service agents |
+| `JEV_ENABLED` | `false` | Enable the Jev AI-driven redundancy/relay decisions |
+| `JEV_MODEL` | `typesafe/jev-1.13` | Jev model id served through OpenRouter |
+| `OPENROUTER_API_KEY` | `` | OpenRouter API key (server-side) for Jev |
+| `JEV_CONFIDENCE_THRESHOLD` | `0.85` | Above this confidence Jev's answer is used; below it falls back to the deterministic table |
 
 ### Docker networking and OIDC_KEYCLOAK_URL
 

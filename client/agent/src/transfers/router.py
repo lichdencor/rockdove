@@ -2,7 +2,7 @@ import asyncio
 import time
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from config import get_settings
 from rs.decoder import decode_transfer
@@ -17,6 +17,23 @@ from transfers.models import HistoryEntry, ReceiveRequest, SendRequest, Transfer
 router = APIRouter()
 
 _transfers: dict[str, dict] = {}
+
+
+async def _relay_candidates(target: str) -> list[str]:
+    """Online peers (other than self and target) that could act as relays."""
+    settings = get_settings()
+    try:
+        peers = await server_client.get_peers()
+    except Exception:
+        return []
+    return [
+        p["peer_id"]
+        for p in peers
+        if p.get("peer_id")
+        and p.get("online")
+        and p["peer_id"] != settings.PEER_ID
+        and p["peer_id"] != target
+    ]
 
 
 @router.post("/send", response_model=TransferResult)
@@ -34,20 +51,30 @@ async def send_file(req: SendRequest) -> TransferResult:
     redundancy_level = req.redundancy_level
     effective_quality: str | None = None
     effective_profile: str | None = None
-    if redundancy_level is None:
-        sender_rec, target_rec = await asyncio.gather(
-            server_client.get_full_recommendation(settings.PEER_ID),
-            server_client.get_full_recommendation(req.target_peer_id),
-        )
-        # Worst endpoint drives redundancy — if either side is degraded, protect the transfer
-        if target_rec["redundancy_level"] >= sender_rec["redundancy_level"]:
-            chosen = target_rec
-        else:
-            chosen = sender_rec
-        redundancy_level = chosen["redundancy_level"]
-        effective_quality = chosen.get("quality")
-        effective_profile = chosen.get("profile_name")
+    should_relay = False
+    relay_peer_id: str | None = None
+    route_source: str | None = None
+    route_confidence: float | None = None
 
+    if redundancy_level is None:
+        # Jev-based transit decision: one call returns the redundancy gradient
+        # (combining both endpoints) AND whether to jump through a relay.
+        relays = await _relay_candidates(req.target_peer_id)
+        route = await server_client.get_transit_decision(
+            settings.PEER_ID, req.target_peer_id, relays=relays
+        )
+        redundancy_level = route["redundancy_level"]
+        effective_quality = route.get("quality")
+        effective_profile = route.get("profile_name")
+        should_relay = bool(route.get("should_relay"))
+        relay_peer_id = route.get("relay_peer_id")
+        route_source = route.get("source_name")
+        route_confidence = route.get("confidence")
+
+    # Resolve the transport endpoint. If Jev chose a relay and it differs from
+    # the direct target, we send to the relay address (P2.2 relay forwarding on
+    # the receiver side is the remaining piece; the endpoint/decision plumbing
+    # is wired here).
     try:
         peer = await server_client.get_peer(req.target_peer_id)
     except ValueError as exc:
@@ -126,12 +153,18 @@ async def send_file(req: SendRequest) -> TransferResult:
         )
     )
 
-    base = result.model_dump(exclude={"effective_redundancy", "quality", "profile_name"})
+    base = result.model_dump(
+        exclude={"effective_redundancy", "quality", "profile_name"}
+    )
     return TransferResult(
         **base,
         effective_redundancy=redundancy_level,
         quality=effective_quality,
         profile_name=effective_profile,
+        should_relay=should_relay,
+        relay_peer_id=relay_peer_id,
+        route_source=route_source,
+        route_confidence=route_confidence,
     )
 
 
@@ -189,6 +222,30 @@ async def get_status(transfer_id: str) -> TransferResult:
 async def get_history(limit: int = 50) -> list[HistoryEntry]:
     rows = await list_history(limit=limit)
     return [HistoryEntry(**r) for r in rows]
+
+
+@router.get("/route/{target_peer_id}")
+async def jev_route(
+    target_peer_id: str,
+    relay: list[str] = Query(default=[], description="Explicit relay candidates"),
+) -> dict:
+    """Query the best route to `target_peer_id` as decided by Jev.
+
+    Works in headless/TTY mode: call this on a running agent's local API to see
+    the redundancy gradient + relay decision Jev recommends for source→target.
+    Returns the raw server decision plus the candidate relays considered.
+    """
+    settings = get_settings()
+    relays = relay or await _relay_candidates(target_peer_id)
+    route = await server_client.get_transit_decision(
+        settings.PEER_ID, target_peer_id, relays=relays
+    )
+    return {
+        "source": settings.PEER_ID,
+        "target": target_peer_id,
+        "relay_candidates": relays,
+        "decision": route,
+    }
 
 
 @router.get("/", response_model=list[TransferResult])

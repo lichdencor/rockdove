@@ -73,15 +73,17 @@ export default function ConnectPage() {
     try {
       const { handleLoopback } = await import("../auth/oidc");
       await startLogin();
-      // Se queda esperando al agente
-      const user = await handleLoopback();
-      // Una vez que tenemos el user, React App.tsx se encargará de cargar el Dashboard
-      // pero forzamos un refresh del estado local para estar seguros
-      const peerId = user.profile.sub ?? "oidc-user";
-      localStorage.setItem("peerId", peerId);
-      localStorage.setItem("token", user.access_token ?? "");
-      markIntroForPlayback();
-      window.location.reload(); 
+      // Electron: el agente expone /auth/poll y espera el código del navegador externo.
+      if (window.rsAgent?.openExternal) {
+        const user = await handleLoopback();
+        const peerId = user.profile.sub ?? "oidc-user";
+        localStorage.setItem("peerId", peerId);
+        localStorage.setItem("token", user.access_token ?? "");
+        markIntroForPlayback();
+        window.location.reload();
+      }
+      // Navegador: startLogin() ya redirige a Keycloak; al volver con code/state,
+      // App.tsx detecta el callback y completa el flujo. No hay que esperar aquí.
     } catch (e) {
       setError(`Error al iniciar SSO: ${(e as Error).message}`);
     } finally {

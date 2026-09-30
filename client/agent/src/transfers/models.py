@@ -51,3 +51,8 @@ class TransferResult(BaseModel):
     effective_redundancy: float | None = None
     quality: str | None = None
     profile_name: str | None = None
+    # Jev transit-route info (redundancy gradient + relay decision).
+    should_relay: bool = False
+    relay_peer_id: str | None = None
+    route_source: str | None = None      # "jev" | "deterministic"
+    route_confidence: float | None = None

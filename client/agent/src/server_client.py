@@ -99,5 +99,49 @@ class ServerClient:
         rec = await self.get_full_recommendation(peer_id)
         return rec["redundancy_level"]
 
+    async def get_transit_decision(
+        self, source: str, target: str, relays: list[str] | None = None
+    ) -> dict:
+        """Ask the server's Jev layer for the transit decision source→target.
+
+        Returns {redundancy_level, quality, should_relay, relay_peer_id,
+        source_name, confidence, ...}. Safe fallback to the static
+        recommendation if the Jev endpoint is unavailable.
+        """
+        params = {"relay": relays} if relays else None
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.get(
+                    f"{self._base}/jev/transit/{source}/{target}",
+                    params=params,
+                    headers=self._auth_headers,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    # Normalise the Jev field names to what send_file expects.
+                    return {
+                        "redundancy_level": data.get("redundancy_level",
+                                                       _DEFAULT_REDUNDANCY),
+                        "quality": data.get("quality"),
+                        "profile_name": data.get("profile_name"),
+                        "should_relay": data.get("should_relay", False),
+                        "relay_peer_id": data.get("relay_peer_id"),
+                        "source_name": data.get("source_name", "deterministic"),
+                        "confidence": data.get("confidence"),
+                        "based_on_samples": data.get("based_on_samples", 0),
+                    }
+        except Exception:
+            pass
+        return {
+            "redundancy_level": _DEFAULT_REDUNDANCY,
+            "quality": "unknown",
+            "profile_name": "unknown",
+            "should_relay": False,
+            "relay_peer_id": None,
+            "source_name": "deterministic",
+            "confidence": None,
+            "based_on_samples": 0,
+        }
+
 
 server_client = ServerClient()

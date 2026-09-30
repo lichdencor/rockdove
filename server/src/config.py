@@ -25,6 +25,17 @@ class Settings(BaseSettings):
     # Headless agent service accounts
     AGENT_SERVICE_TOKEN: str = ""
 
+    # Jev (TypeSafe System One) decision model, consumed via OpenRouter.
+    # JEV_ENABLED=false disables Jev and always uses the deterministic table.
+    JEV_ENABLED: bool = False
+    JEV_MODEL: str = "typesafe/jev-1.13"
+    JEV_BASE_URL: str = "https://openrouter.ai/api/alpha/decisions"
+    OPENROUTER_API_KEY: str = ""
+    JEV_TIMEOUT_S: float = 10.0
+    # Confidence gate. Above this the code acts on Jev's answer; below it the
+    # deterministic quality table is used as a safe fallback.
+    JEV_CONFIDENCE_THRESHOLD: float = 0.85
+
     model_config = {"env_file": ".env"}
 
 
