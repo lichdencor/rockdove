@@ -81,6 +81,59 @@ async def _peer_metrics(peer_id: str, org_id: str) -> tuple[dict | None, dict]:
     return avg, data
 
 
+async def _link_metrics_neo4j(source: str, target: str) -> dict | None:
+    """Read the source→target link metrics (RTT/jitter/loss) from Neo4j.
+
+    The merged graph-layer stores P2P probe metrics on the ``CONNECTS_TO``
+    edge (store_report → MERGE CONNECTS_TO). This lets the Jev decider use the
+    *real, measured* link values even though the per-peer Redis summary only
+    holds server-relative probes.
+
+    Returns a dict matching the ``get_average`` shape, or None if unavailable.
+    """
+    try:
+        from neo4j_client import get_neo4j
+
+        driver = get_neo4j()
+        query = (
+            "MATCH (a:Peer {peer_id: $src}), "
+            "      (b:Peer {peer_id: $dst}) "
+            "MATCH (a)-[r:CONNECTS_TO]->(b) "
+            "RETURN r.rtt_ms AS rtt, r.jitter_ms AS jitter, "
+            "       r.loss_rate AS loss, r.updated_at AS updated "
+            "ORDER BY r.updated_at DESC LIMIT 1"
+        )
+        async with driver.session() as session:
+            row = await (await session.run(
+                query, src=source, dst=target
+            )).single()
+        if row is None:
+            # Try the reverse direction (CONNECTS_TO may be recorded one way).
+            query_rev = (
+                "MATCH (a:Peer {peer_id: $src}), "
+                "      (b:Peer {peer_id: $dst}) "
+                "MATCH (a)-[r:CONNECTS_TO]->(b) "
+                "RETURN r.rtt_ms AS rtt, r.jitter_ms AS jitter, "
+                "       r.loss_rate AS loss, r.updated_at AS updated "
+                "ORDER BY r.updated_at DESC LIMIT 1"
+            )
+            async with driver.session() as session2:
+                row = await (await session2.run(
+                    query_rev, src=target, dst=source
+                )).single()
+        if row is None:
+            return None
+        return {
+            "rtt_ms": float(row["rtt"] or 0.0),
+            "jitter_ms": float(row["jitter"] or 0.0),
+            "loss_rate": float(row["loss"] or 0.0),
+            "samples": 1,
+            "source": "neo4j",
+        }
+    except Exception:
+        return None
+
+
 def _fallback(
     avg: dict,
     network_hint: str,
@@ -124,9 +177,37 @@ async def decide_transit(
 
     src_avg, src_peer = await _peer_metrics(source_id, org_id)
     tgt_avg, tgt_peer = await _peer_metrics(target_id, org_id)
-    samples = (src_avg or {}).get("samples", 0) + (tgt_avg or {}).get("samples", 0)
 
-    if not src_avg and not tgt_avg:
+    # Merged graph-layer stores P2P link metrics on the CONNECTS_TO edge (Neo4j).
+    # Use it to back-fill when Redis has no per-peer summary.
+    graph_link = await _link_metrics_neo4j(source_id, target_id)
+
+    # Effective averages: prefer Redis (most samples), else the measured Neo4j
+    # edge, else 0 (no signal → conservative).
+    def _avg_or(avg: dict | None, key: str, graph_key: str, default: float) -> float:
+        if avg:
+            return avg[key]
+        if graph_link and graph_link.get(graph_key) is not None:
+            return graph_link[graph_key]
+        return default
+
+    eff_rtt = max(_avg_or(src_avg, "rtt_ms", "rtt_ms", 0.0),
+                  _avg_or(tgt_avg, "rtt_ms", "rtt_ms", 0.0))
+    eff_jit = max(_avg_or(src_avg, "jitter_ms", "jitter_ms", 0.0),
+                  _avg_or(tgt_avg, "jitter_ms", "jitter_ms", 0.0))
+    eff_loss = max(_avg_or(src_avg, "loss_rate", "loss_rate", 0.0),
+                   _avg_or(tgt_avg, "loss_rate", "loss_rate", 0.0))
+    eff_hint = src_peer.get("network_hint", "auto") or "auto"
+
+    # Number of telemetry samples we actually have.
+    if src_avg or tgt_avg:
+        samples = (src_avg or {}).get("samples", 0) + (tgt_avg or {}).get("samples", 0)
+    elif graph_link:
+        samples = 1
+    else:
+        samples = 0
+
+    if samples == 0:
         # No telemetry at all → conservative deterministic default.
         level, quality, profile_name = compute_recommendation(
             rtt_ms=0.0, jitter_ms=0.0, loss_rate=0.0,
@@ -137,16 +218,6 @@ async def decide_transit(
             should_relay=False, relay_peer_id=None, based_on_samples=0,
             source=source_id, target=target_id,
         )
-
-    # Build the effective link metrics combining both endpoints (the strongest
-    # signal from both ends guards the transfer in one direction).
-    def _pick_avg(avg: dict | None, hint_default: float) -> float:
-        return avg[hint_default] if avg else hint_default
-
-    eff_rtt = max(_pick_avg(src_avg, "rtt_ms"), _pick_avg(tgt_avg, "rtt_ms"))
-    eff_jit = max(_pick_avg(src_avg, "jitter_ms"), _pick_avg(tgt_avg, "jitter_ms"))
-    eff_loss = max(_pick_avg(src_avg, "loss_rate"), _pick_avg(tgt_avg, "loss_rate"))
-    eff_hint = src_peer.get("network_hint", "auto") or "auto"
 
     settings = get_settings()
     client = JevClient()
