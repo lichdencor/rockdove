@@ -45,6 +45,32 @@ async def _apply_server_incoming_policy(peer_id: str) -> None:
         pass
 
 
+async def _handle_incoming_metric(payload: bytes) -> None:
+    """Process a peer's QUIC metric signal (best-effort, non-blocking).
+
+    The signal is a JSON MetricReport, but it arrives out-of-band from a peer
+    (not via the central server). For now we log it; it could be relayed to the
+    server if this agent is acting as a relay/edge concentrator.
+    """
+    try:
+        import json
+        from server_client import server_client as sc
+        report = json.loads(payload)
+        # Forward the peer's observed link metrics to the central server so the
+        # Jev decider gets data even from the remote end of a multi-hop link.
+        rtt = float(report.get("rtt_ms", 0.0))
+        if rtt > 0:
+            await sc.report_metrics(
+                report.get("peer_id", "unknown"),
+                target_peer_id=report.get("target_peer_id", "server"),
+                rtt_ms=rtt,
+                jitter_ms=float(report.get("jitter_ms", 0.0)),
+                loss_rate=float(report.get("loss_rate", 0.0)),
+            )
+    except Exception:
+        pass
+
+
 async def _heartbeat_loop() -> None:
     consecutive_failures = 0
     while True:
@@ -120,7 +146,9 @@ async def lifespan(app: FastAPI):
 
     transport_mode = config_store.get("transport_mode", "udp")
     if transport_mode == "quic":
-        set_transport(QUICTransport())
+        quic = QUICTransport()
+        quic.on_metric = _handle_incoming_metric
+        set_transport(quic)
     else:
         set_transport(UDPTransport())
     await get_transport().start(

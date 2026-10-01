@@ -36,6 +36,9 @@ from .encoder import HEADER_FMT, HEADER_SIZE
 # Magic header that identifies a CERT_HELLO datagram (RDCH = RockDove Connection Hello)
 _CERT_HELLO_MAGIC = b"\x52\x44\x43\x48"
 
+# Magic prefix for a metric signal delivered over a QUIC stream (RDM = RockDove Metric)
+_METRIC_MAGIC = b"\x52\x44\x4d"
+
 # ── Shared receive buffer ──────────────────────────────────────────────────────
 
 class _TransferBuffer:
@@ -208,13 +211,19 @@ try:
     from aioquic.asyncio import serve as _quic_serve
     from aioquic.asyncio.protocol import QuicConnectionProtocol
     from aioquic.quic.configuration import QuicConfiguration
-    from aioquic.quic.events import DatagramFrameReceived, QuicEvent
+    from aioquic.quic.events import (
+        DatagramFrameReceived,
+        StreamDataReceived,
+        QuicEvent,
+    )
 
     class _QUICServerProtocol(QuicConnectionProtocol):
-        def __init__(self, *args, buffers: dict, on_connect=None, **kwargs):
+        def __init__(self, *args, buffers: dict, on_connect=None, on_metric=None, **kwargs):
             super().__init__(*args, **kwargs)
             self._buffers = buffers
             self._on_connect = on_connect
+            self._on_metric = on_metric
+            self._metric_parts: list[bytes] = []
 
         def _handle_cert_hello(self, data: bytes) -> None:
             """Parse a CERT_HELLO datagram and fire the on_connect callback."""
@@ -232,22 +241,38 @@ try:
             except Exception:
                 pass
 
+        def _handle_metric_stream(self, stream_id: int, data: bytes, end_stream: bool) -> None:
+            """Assemble a metric signal delivered over a QUIC stream."""
+            if data:
+                self._metric_parts.append(data)
+            if end_stream:
+                payload = b"".join(self._metric_parts)
+                self._metric_parts = []
+                if self._on_metric and payload:
+                    try:
+                        self._on_metric(payload)
+                    except Exception:
+                        pass
+
         def quic_event_received(self, event: QuicEvent) -> None:
-            if not isinstance(event, DatagramFrameReceived):
-                return
-            data = event.data
-            if data[:4] == _CERT_HELLO_MAGIC:
-                self._handle_cert_hello(data)
-                return
-            if len(data) <= HEADER_SIZE:
-                return
-            hdr = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
-            tid = hdr[0].hex()
-            block_index = hdr[1]
-            total_blocks = hdr[2]
-            if tid not in self._buffers:
-                self._buffers[tid] = _TransferBuffer(total_blocks)
-            self._buffers[tid].add(block_index, data)
+            if isinstance(event, DatagramFrameReceived):
+                data = event.data
+                if data[:4] == _CERT_HELLO_MAGIC:
+                    self._handle_cert_hello(data)
+                    return
+                if len(data) <= HEADER_SIZE:
+                    return
+                hdr = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
+                tid = hdr[0].hex()
+                block_index = hdr[1]
+                total_blocks = hdr[2]
+                if tid not in self._buffers:
+                    self._buffers[tid] = _TransferBuffer(total_blocks)
+                self._buffers[tid].add(block_index, data)
+            elif isinstance(event, StreamDataReceived):
+                self._handle_metric_stream(
+                    event.stream_id, event.data, event.end_stream
+                )
 
     class _QUICClientProtocol(QuicConnectionProtocol):
         def quic_event_received(self, event: QuicEvent) -> None:
@@ -263,6 +288,13 @@ try:
             for pkt in packets:
                 self._quic.send_datagram_frame(pkt)
                 await asyncio.sleep(0)
+            self.transmit()
+            await asyncio.sleep(0.05)
+
+        async def send_metric(self, payload: bytes) -> None:
+            """Reliably deliver a metric signal over a QUIC stream (ordered)."""
+            stream_id = self._quic.get_next_available_stream_id()
+            self._quic.send_stream_data(stream_id, payload, end_stream=True)
             self.transmit()
             await asyncio.sleep(0.05)
 
@@ -316,6 +348,9 @@ class QUICTransport(BaseTransport):
         self._pending_conns: dict[str, dict] = {}
         self._approval_events: dict[str, asyncio.Event] = {}
         self._rejection_events: dict[str, asyncio.Event] = {}
+        # Metric signal callback: called with raw payload when a remote peer
+        # delivers a metric signal over a QUIC stream.
+        self.on_metric = None
 
     # ── cert lifecycle ─────────────────────────────────────────────────────────
 
@@ -344,7 +379,8 @@ class QUICTransport(BaseTransport):
 
         def make_protocol(*args, **kwargs):
             return _QUICServerProtocol(
-                *args, buffers=buffers, on_connect=on_connect, **kwargs
+                *args, buffers=buffers, on_connect=on_connect,
+                on_metric=self.on_metric, **kwargs
             )
 
         self._server_task = asyncio.create_task(
@@ -383,6 +419,31 @@ class QUICTransport(BaseTransport):
         ) as proto:
             await proto.send_cert_hello(hello)
             await proto.send_packets(packets)
+
+    async def send_metric(self, host: str, port: int, payload: bytes) -> None:
+        """Reliably deliver a metric signal to a remote peer over a QUIC stream.
+
+        Unlike the RS datagrams (unreliable), a metric signal uses a QUIC
+        stream so RTT/jitter/loss samples arrive complete and in order. The
+        remote peer's _QUICServerProtocol routes it to `self.on_metric`.
+        """
+        if not _AIOQUIC_AVAILABLE:
+            return
+        self._init_cert_paths()
+        frame = _METRIC_MAGIC + payload
+        config = QuicConfiguration(is_client=True, max_datagram_frame_size=65536)
+        config.verify_mode = ssl.CERT_NONE
+        try:
+            async with _quic_connect(
+                host,
+                port,
+                configuration=config,
+                create_protocol=_QUICClientProtocol,
+                wait_connected=True,
+            ) as proto:
+                await proto.send_metric(frame)
+        except Exception:
+            pass  # metric signals are best-effort; don't block the probe loop
 
     async def collect(self, transfer_id: str, timeout: float = 30.0) -> list[bytes]:
         deadline = time.monotonic() + timeout

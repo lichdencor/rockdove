@@ -1,11 +1,18 @@
 """
 Background RTT/jitter probe for network quality monitoring.
 
-Every 60s, pings all online peers via HTTP /health and reports measured
-latency to the server. This feeds the adaptive redundancy recommender with
-real network data so it can make meaningful recommendations.
+Every 60s, pings all online peers and reports measured latency to the server.
+Two reporting channels:
+  * HTTP: POST /metrics/report (always — feeds the central server + Neo4j).
+  * QUIC stream (when TRANSPORT_MODE=quic): a reliable in-band metric signal
+    (RFC 9221 DATAGRAM for RS blocks, QUIC stream for metrics) so peers can
+    observe link quality directly, e.g. via a sat/edge relay.
+
+Both report the same measured RTT/jitter/loss so the Jev decider (server) and
+peers agree on link state.
 """
 import asyncio
+import json
 import time
 
 import httpx
@@ -37,6 +44,17 @@ async def _probe_rtt(api_url: str) -> tuple[float, float]:
     return mean, jitter
 
 
+async def _report_over_quic(host: str, port: int, report: dict) -> None:
+    """Best-effort delivery of a metric signal over a QUIC stream."""
+    try:
+        from rs.transport import QUICTransport, get_transport
+        transport = get_transport()
+        if isinstance(transport, QUICTransport):
+            await transport.send_metric(host, port, json.dumps(report).encode())
+    except Exception:
+        pass
+
+
 async def rtt_probe_loop() -> None:
     settings = get_settings()
     while True:
@@ -56,6 +74,14 @@ async def rtt_probe_loop() -> None:
                 continue
             try:
                 rtt_ms, jitter_ms = await _probe_rtt(api_url)
+                report = {
+                    "peer_id": settings.PEER_ID,
+                    "target_peer_id": target_peer_id,
+                    "rtt_ms": rtt_ms,
+                    "jitter_ms": jitter_ms,
+                    "loss_rate": 0.0,
+                    "recorded_at": None,
+                }
                 if rtt_ms > 0:
                     await server_client.report_metrics(
                         settings.PEER_ID,
@@ -64,5 +90,7 @@ async def rtt_probe_loop() -> None:
                         jitter_ms=jitter_ms,
                         loss_rate=0.0,
                     )
+                # In QUIC mode also push the same signal in-band to the peer.
+                await _report_over_quic(peer.get("udp_host", ""), peer.get("udp_port", 0), report)
             except Exception:
                 pass

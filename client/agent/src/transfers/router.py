@@ -110,10 +110,7 @@ async def send_file(req: SendRequest) -> TransferResult:
         route_source = route.get("source_name")
         route_confidence = route.get("confidence")
 
-    # Resolve the transport endpoint. If Jev chose a relay and it differs from
-    # the direct target, we send to the relay address (P2.2 relay forwarding on
-    # the receiver side is the remaining piece; the endpoint/decision plumbing
-    # is wired here).
+    # Resolve the transport endpoint for the direct target (C).
     try:
         peer = await server_client.get_peer(req.target_peer_id)
     except ValueError as exc:
@@ -147,33 +144,64 @@ async def send_file(req: SendRequest) -> TransferResult:
     relay_info: dict | None = None
     relay_tag: str | None = None
 
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+    # ── Proactive relay (A→B→C) driven by Jev ────────────────────────────────
+    # If the transit decision said "jump through relay B" and named a different
+    # peer than the target, route through it without first trying the direct
+    # path. This is the Jev-driven jump, not just a fallback on network error.
+    if should_relay and relay_peer_id and relay_peer_id != req.target_peer_id:
         try:
-            r = await client.post(
-                f"{target_api_url}/transfer/receive",
-                json=receive_payload,
-            )
-            if r.status_code not in (200, 202):
-                raise HTTPException(502, f"Peer rejected transfer: {r.text}")
-        except httpx.RequestError:
-            # Direct path failed — attempt relay fallback
-            try:
-                relay_info = await server_client.get_relay_for_peer(req.target_peer_id)
-            except ValueError as relay_err:
-                raise HTTPException(502, f"Cannot reach peer directly and no relay available: {relay_err}")
-            relay_tag = f"rly-{secrets.token_hex(4)}"
-            relay_api_url = relay_info["api_url"]
-            relay_payload = {**receive_payload, "relay_to": req.target_peer_id, "relay_tag": relay_tag}
+            relay_peer = await server_client.get_peer(relay_peer_id)
+        except ValueError as exc:
+            raise HTTPException(404, f"Jev-nominated relay not found: {exc}")
+        relay_info = relay_peer
+        relay_tag = f"rly-{secrets.token_hex(4)}"
+        relay_api_url = relay_peer["api_url"]
+        relay_payload = {
+            **receive_payload,
+            "relay_to": req.target_peer_id,
+            "relay_tag": relay_tag,
+        }
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
             try:
                 r = await client.post(f"{relay_api_url}/transfer/receive", json=relay_payload)
                 if r.status_code not in (200, 202):
                     raise HTTPException(502, f"Relay rejected transfer: {r.text}")
-            except httpx.RequestError as relay_exc:
-                raise HTTPException(502, f"Cannot reach relay peer: {relay_exc}")
-            # Override send target to relay
-            target_api_url = relay_api_url
-            target_udp_host = relay_info["udp_host"]
-            target_udp_port = relay_info["udp_port"]
+            except httpx.RequestError as exc:
+                raise HTTPException(502, f"Cannot reach relay peer: {exc}")
+        # Override send target to the relay (B), which re-forwards to C.
+        target_api_url = relay_api_url
+        target_udp_host = relay_info["udp_host"]
+        target_udp_port = relay_info["udp_port"]
+
+    else:
+        # Direct path first (A→C); fall back to a server-chosen relay on error.
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            try:
+                r = await client.post(
+                    f"{target_api_url}/transfer/receive",
+                    json=receive_payload,
+                )
+                if r.status_code not in (200, 202):
+                    raise HTTPException(502, f"Peer rejected transfer: {r.text}")
+            except httpx.RequestError:
+                # Direct path failed — attempt relay fallback
+                try:
+                    relay_info = await server_client.get_relay_for_peer(req.target_peer_id)
+                except ValueError as relay_err:
+                    raise HTTPException(502, f"Cannot reach peer directly and no relay available: {relay_err}")
+                relay_tag = f"rly-{secrets.token_hex(4)}"
+                relay_api_url = relay_info["api_url"]
+                relay_payload = {**receive_payload, "relay_to": req.target_peer_id, "relay_tag": relay_tag}
+                try:
+                    r = await client.post(f"{relay_api_url}/transfer/receive", json=relay_payload)
+                    if r.status_code not in (200, 202):
+                        raise HTTPException(502, f"Relay rejected transfer: {r.text}")
+                except httpx.RequestError as relay_exc:
+                    raise HTTPException(502, f"Cannot reach relay peer: {relay_exc}")
+                # Override send target to relay
+                target_api_url = relay_api_url
+                target_udp_host = relay_info["udp_host"]
+                target_udp_port = relay_info["udp_port"]
 
     t_send = time.monotonic()
     await get_transport().send(packets, target_udp_host, target_udp_port)
