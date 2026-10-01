@@ -1,0 +1,21 @@
+digraph Topologia {
+  graph [rankdir=TB, bgcolor="transparent", fontname="DejaVu Sans", nodesep=0.5];
+  node [shape=ellipse, style=filled, fontname="DejaVu Sans"];
+  edge [fontname="DejaVu Sans", fontsize=9];
+
+  // Nube del servidor
+  server [shape=component, style=filled, fillcolor="#0b3d78", fontcolor=white,
+          label="Servidor Central\nCoordinación + IA (Jev)", fontsize=11, fontcolor=white];
+
+  A [label="Peer A\nemisor local", fillcolor="#e8f4fd", color="#2196F3"];
+  B [label="Peer B\nrelay (30 km)", fillcolor="#e8f4fd", color="#2196F3"];
+  C [label="Peer C\ndestino (wifi pobre)", fillcolor="#e8f4fd", color="#2196F3"];
+
+  server -> A [style=dashed, label="métricas", color="gray60"];
+  server -> B [style=dashed, label="métricas", color="gray60"];
+  server -> C [style=dashed, label="métricas", color="gray60"];
+
+  A -> B [label="UDP", color="#1565c0"];
+  B -> C [label="UDP", color="#1565c0"];
+  A -> C [style=dotted, label="directo (frágil)", color="#c62828"];
+}

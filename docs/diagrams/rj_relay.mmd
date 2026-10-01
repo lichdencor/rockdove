@@ -1,0 +1,16 @@
+flowchart LR
+  A["🅰️ Peer A<br/>(emisor)"]:::peer
+  B["🅱️ Peer B<br/>(relay)"]:::relay
+  C["🅲 Peer C<br/>(destino)"]:::peer
+
+  A -->|"1. pide decisión a Jev"| J["Jev<br/>should_relay=yes<br/>relay_target=B"]:::ai
+  J -->|"2. A configura ruta"| A
+  A -->|"3. bloques RS → B<br/>(relay_to=C)"| B
+  B -->|"4. re-encapsula y reenvía"| C
+  C -->|"5. verifica SHA y confirma"| A
+
+  A -.->|"camino directo A→C<br/>(descartado / fallido)"| C
+
+  classDef peer fill:#e8f4fd,stroke:#2196F3
+  classDef relay fill:#e6f7e6,stroke:#2e7d32
+  classDef ai fill:#f3e8ff,stroke:#7c3aed,color:#3b0764

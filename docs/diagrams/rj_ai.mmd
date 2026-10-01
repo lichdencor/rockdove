@@ -1,0 +1,41 @@
+flowchart LR
+  subgraph ENC["Entrada (state + preguntas)"]
+    ST["state: métricas de red<br/>rtt, jitter, pérdida, topología"]
+    Q1["pregunta: redundancy_band<br/>(Score)"]
+    Q2["pregunta: should_relay<br/>(Noul)"]
+    Q3["pregunta: relay_target<br/>(Choice)"]
+  end
+
+  subgraph LM["Modelo base (decoder)<br/>procesa todo en un pase"]
+    H1["repr pregunta 1"]
+    H2["repr pregunta 2"]
+    H3["repr pregunta 3"]
+    HOP["repr de cada opción"]
+  end
+
+  subgraph PH["Pointer head"]
+    SC1["score(decisión, opciones)"]
+    SC2["softmax → P(opción)"]
+  end
+
+  subgraph OUT["Salida tipada en paralelo"]
+    R1["redundancy_band: score + confianza"]
+    R2["should_relay: probabilidad 0–1"]
+    R3["relay_target: choice + distribución"]
+  end
+
+  ST --> LM
+  Q1 --> LM
+  Q2 --> LM
+  Q3 --> LM
+  LM --> PH
+  H1 --> SC1
+  H2 --> SC1
+  H3 --> SC1
+  HOP --> SC1
+  SC1 --> SC2
+  PH --> OUT
+
+  classDef lm fill:#f5f7fa,stroke:#90a4ae
+  classDef ph fill:#fff3e0,stroke:#FF9800
+  classDef out fill:#e6f7e6,stroke:#2e7d32

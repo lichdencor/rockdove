@@ -1,0 +1,17 @@
+digraph Relay {
+  graph [rankdir=LR, bgcolor="transparent", fontname="DejaVu Sans", nodesep=0.6, ranksep=0.8];
+  node [style=filled, fontname="DejaVu Sans"];
+  edge [fontname="DejaVu Sans", fontsize=9];
+
+  A [shape=ellipse, label="Peer A\nemisor", fillcolor="#e8f4fd", color="#2196F3"];
+  B [shape=ellipse, label="Peer B\nrelay", fillcolor="#e6f7e6", color="#2e7d32"];
+  C [shape=ellipse, label="Peer C\ndestino", fillcolor="#e8f4fd", color="#2196F3"];
+  J [shape=box, label="Jev\nshould_relay=yes\nrelay_target=B", fillcolor="#f3e8ff", color="#7c3aed", fontcolor="#3b0764"];
+
+  A -> J [label="1. pide decisión"];
+  J -> A [label="2. configura ruta"];
+  A -> B [label="3. bloques RS\n(relay_to=C)"];
+  B -> C [label="4. re-encapsula y reenvía"];
+  C -> A [label="5. verifica SHA", style=dashed];
+  A -> C [style=dotted, label="camino directo", color="#c62828"];
+}
