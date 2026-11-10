@@ -79,8 +79,8 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "Gemdelle",
-      "repo": "reed-solomon_RD-II",
+      "owner": "lichdencor",
+      "repo": "rockdove",
       "releaseType": "draft"
     }
   }
