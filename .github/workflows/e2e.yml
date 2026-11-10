@@ -1,0 +1,53 @@
+name: E2E dinámico
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lab:
+    name: Lab — smoke + listas de acceso
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start test lab
+        run: docker compose -f test/docker-compose.test.yml up -d --build --wait
+      - name: Smoke (rd-a -> rd-b)
+        run: python3 test/smoke.py
+      - name: Access-list matrix
+        run: python3 test/policy.py
+      - name: Lab logs on failure
+        if: failure()
+        run: docker compose -f test/docker-compose.test.yml logs --tail=100
+      - name: Stop lab
+        if: always()
+        run: docker compose -f test/docker-compose.test.yml down -v
+
+  electron:
+    name: Electron headless (xvfb) + UI por CDP
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install agent deps
+        working-directory: client/agent
+        run: uv sync
+      - name: Install client and UI deps
+        run: |
+          npm ci --prefix client
+          npm ci --prefix client/ui
+          npm i --prefix client --no-save playwright-core
+      - name: Build UI and Electron main
+        run: |
+          npm run build --prefix client/ui
+          npm run build:electron --prefix client
+      - name: Serve built UI
+        run: (cd client/ui && nohup npx vite preview --port 5173 --strictPort > /tmp/vite.log 2>&1 &) ; sleep 4
+      - name: Headless Electron e2e
+        working-directory: client
+        env:
+          PYTHONPATH: ${{ github.workspace }}/client/agent/src
+        run: xvfb-run -a node ../test/e2e_electron.js
