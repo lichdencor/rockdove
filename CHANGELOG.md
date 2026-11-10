@@ -1,3 +1,10 @@
+## [1.2.2](https://github.com/lichdencor/rockdove/compare/v1.2.1...v1.2.2) (2026-11-10)
+
+
+### Bug Fixes
+
+* **agent:** persist incoming access-list keys in config_store ([c85bad5](https://github.com/lichdencor/rockdove/commit/c85bad5521fccead4456345e77cfec40660fbd92))
+
 ## [1.2.1](https://github.com/lichdencor/rockdove/compare/v1.2.0...v1.2.1) (2026-11-10)
 
 
