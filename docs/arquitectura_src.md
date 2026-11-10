@@ -1,6 +1,6 @@
 ---
-title: "RockDove — Sistema P2P con Reed-Solomon"
-subtitle: "Arquitectura, Algoritmo e Infraestructura"
+title: "RockDove — Sistema de Transferencia P2P con Corrección de Errores"
+subtitle: "Arquitectura del Sistema — Modelo C4"
 author: "Grupo 1 — Redes de Datos II"
 date: "2026"
 lang: es
@@ -13,574 +13,688 @@ fontsize: 11pt
 
 \newpage
 
-# Descripción del Sistema
+# Introducción
 
-## ¿Qué es RockDove?
+La transferencia confiable de archivos sobre redes inestables presenta un desafío fundamental: el
+protocolo UDP, elegido por su baja latencia y ausencia de sobrecarga de conexión, no garantiza
+entrega ni orden de los datagramas. En redes con pérdida de paquetes, una transferencia sin
+protección produce datos incompletos o corruptos. Las alternativas clásicas presentan limitaciones
+importantes en este contexto:
 
-**RockDove** es una plataforma de transferencia de archivos entre pares (*peer-to-peer*) que aplica
-el algoritmo de corrección de errores **Reed-Solomon** sobre **UDP** para garantizar la integridad
-de los datos incluso en redes con pérdida de paquetes. La redundancia matemática se calcula de
-forma adaptativa según las condiciones de red medidas en tiempo real, sin necesidad de que el
-usuario configure parámetros técnicos manualmente.
-
-El sistema está pensado para dos escenarios complementarios:
-
-- **Transferencia entre usuarios de escritorio:** dos o más usuarios de la misma organización se
-  envían archivos directamente entre máquinas, con verificación criptográfica de integridad.
-- **Ingesta a dispositivos edge / IoT:** un nodo con conectividad degradada (celular, satelital,
-  industrial) recibe datos con garantía de reconstrucción aunque se pierdan paquetes, sin
-  retransmisión.
-
-## El problema que resuelve
-
-UDP no garantiza entrega ni orden. En redes inestables, una transferencia sin protección resulta en
-datos incompletos o corruptos. Las alternativas clásicas son:
-
-| Alternativa | Problema |
+| Alternativa | Limitación |
 |---|---|
-| TCP | Retransmisión costosa en links de alta latencia o intermitentes |
-| Ignorar la pérdida | Inaceptable para archivos completos |
-| Checksum + retry | Requiere round-trips, imposible en links unidireccionales |
+| TCP con retransmisión | Costo prohibitivo en enlaces de alta latencia o intermitentes; incompatible con links unidireccionales |
+| Checksum y reenvío explícito | Requiere round-trips; imposible en topologías unidireccionales o con alta latencia |
+| Ignorar la pérdida | Inaceptable para transferencia de archivos completos con verificación de integridad |
 
-RockDove aplica **Forward Error Correction (FEC)** mediante Reed-Solomon: el emisor agrega
-redundancia antes de enviar. El receptor reconstruye el original aunque lleguen menos paquetes de
-los enviados, **sin contactar al emisor**.
+RockDove aborda este problema mediante **Forward Error Correction (FEC)**: el emisor agrega
+redundancia matemática calculada sobre el contenido original antes de enviarlo. El receptor
+reconstruye el archivo completo aunque lleguen menos paquetes de los enviados, sin necesidad de
+contactar al emisor nuevamente. El nivel de redundancia se ajusta automáticamente en función de
+la calidad de red medida en tiempo real, evitando que el usuario deba configurar parámetros
+técnicos manualmente.
 
-## Casos de uso
-
-| Caso | Escenario típico |
-|---|---|
-| Transferencia intra-organización | Usuario A envía reporte a colega B |
-| Ingesta a nodo edge | Servidor central envía configuración a planta remota |
-| Verificación forense | Sistema certifica si el archivo llegó íntegro (`ok`), con recuperación RS (`degraded`) o irrecuperable (`failed`) |
-| Dispositivos headless | Sensores o cámaras reciben archivos sin interfaz gráfica, autenticados con token de dispositivo |
+El presente informe describe la arquitectura del sistema siguiendo el **modelo C4** en sus
+cuatro niveles: contexto del sistema, contenedores, componentes e implementación. El objetivo es
+proporcionar una descripción completa y precisa del diseño, sus decisiones técnicas y los
+compromisos que las motivan.
 
 \newpage
 
-# Algoritmo Reed-Solomon
+# Descripción del Sistema
 
-## Fundamento matemático
+## Qué es RockDove
 
-Reed-Solomon es un código corrector de errores que opera sobre **GF(2^8^)** (campo de Galois de
-256 elementos). Cada símbolo del código es un byte. El codificador toma **k** bytes originales y
-produce **n** bytes totales: los k originales más **n − k** bytes de paridad generados
-algebraicamente.
+RockDove es una plataforma de transferencia de archivos entre pares (*peer-to-peer*) que aplica el
+algoritmo de corrección de errores Reed-Solomon sobre UDP para garantizar la integridad de los
+datos incluso en redes con pérdida de paquetes. El sistema está pensado para dos escenarios
+complementarios:
 
-La propiedad fundamental: el receptor puede reconstruir los k bytes originales a partir de
-**cualquier combinación de k de los n bytes recibidos**, sin importar cuáles k−n se perdieron.
-En el contexto UDP, donde se conoce exactamente qué paquetes llegaron (*erasure model*), esta
-capacidad se aprovecha al máximo: cada paquete perdido equivale a una posición de erasure conocida.
+- **Transferencia entre usuarios de escritorio:** dos o más miembros de una organización transfieren
+  archivos directamente entre sus máquinas, con verificación criptográfica de integridad y
+  autenticación federada opcional.
+- **Ingesta a dispositivos edge e IoT:** un nodo con conectividad degradada (enlace celular,
+  satelital o industrial) recibe datos con garantía de reconstrucción aunque se pierdan paquetes,
+  sin retransmisión y sin intervención humana.
 
-## Parámetros RS(n, k)
+## Diseño de dos planos
 
-| Símbolo | Significado |
-|---|---|
-| `k` | Bytes de datos originales por bloque |
-| `n` | Bytes totales tras codificar (k + paridad); máximo 255 en GF(2^8^) |
-| `n − k` | Bytes de paridad (capacidad de corrección) |
-| `r = (n−k)/n` | Ratio de redundancia — controla cuánta pérdida se tolera |
+La decisión de diseño más importante de RockDove es la separación estricta entre **plano de
+control** y **plano de datos**. Ambos planos son independientes y comunican por interfaces bien
+definidas:
 
-**Capacidad de corrección en modo erasure:** si `r = 0.30`, el sistema tolera hasta un 30% de
-paquetes perdidos por bloque y los reconstruye sin errores.
+**Plano de control — servidor central (una instancia en cloud):**
+gestiona la identidad de los peers, su presencia en línea, la telemetría de red y las rutas de
+relay. Responde exactamente a dos preguntas operativas: *"¿dónde está el peer B?"* y *"¿qué nivel
+de redundancia conviene dado el estado actual de la red?"*. El servidor nunca accede al contenido
+de los archivos transferidos.
 
-## Del slider al parámetro RS
+**Plano de datos — agente local (uno por máquina):**
+cada participante ejecuta un agente que realiza la codificación y decodificación Reed-Solomon,
+maneja el socket UDP o QUIC, almacena archivos en el sistema de archivos local y mantiene el
+historial de transferencias en una base de datos embebida.
 
-El usuario selecciona un nivel de redundancia `r ∈ [0.05, 0.50]`. El sistema determina
-automáticamente los parámetros:
+La transferencia de datos es directa, máquina a máquina, sobre UDP. El servidor no interviene en
+el flujo de datos en ningún momento.
+
+Esta arquitectura es análoga al patrón de coordinación implementado por herramientas como
+Tailscale o Syncthing: un servidor central facilita el descubrimiento de peers, pero la
+comunicación efectiva ocurre de forma directa entre los endpoints.
+
+![Diagrama de arquitectura general del sistema](img/architecture.png)
+
+\newpage
+
+# Nivel 1 — Contexto del Sistema
+
+El nivel de contexto describe el sistema como una caja negra y sus relaciones con actores externos
+y sistemas adyacentes.
+
+![Diagrama de contexto C4 — Nivel 1](img/c4_context.png)
+
+## Actores externos
+
+**Usuario desktop:** desarrollador o usuario final con RockDove instalado en su computadora
+personal. Interactúa con el sistema para enviar y recibir archivos, visualizar el estado de los
+peers de su organización y configurar opciones de transporte y redundancia.
+
+**Administrador de organización:** usuario privilegiado que gestiona la configuración
+organizacional del sistema: define scopes de visibilidad entre grupos de peers, genera tokens de
+dispositivo para nodos headless, administra políticas de transferencias entrantes y supervisa el
+estado de salud de la red a través del panel de administración.
+
+**Dispositivo edge / IoT:** nodo sin interfaz gráfica que se registra en el sistema mediante un
+token de dispositivo autogenerado. Opera de forma completamente autónoma: se registra al arrancar,
+mantiene su presencia mediante señales de vida periódicas y recibe transferencias UDP entrantes que
+almacena en su sistema de archivos local.
+
+## Sistemas externos
+
+**Keycloak (opcional):** proveedor de identidad externo que implementa el protocolo OpenID Connect.
+RockDove lo integra para la autenticación de usuarios humanos en entornos de producción. El servidor
+central valida los tokens JWT emitidos por Keycloak para derivar la identidad del peer y su
+pertenencia organizacional. La integración es opcional: el sistema puede operar en modo de
+desarrollo sin proveedor de identidad externo.
+
+## Relaciones principales
+
+El usuario desktop utiliza RockDove para enviar y recibir archivos y para configurar opciones de
+transporte. El administrador gestiona la organización y las políticas de acceso a través del panel
+de administración embebido en la interfaz. El dispositivo edge se registra y transfiere archivos
+usando un token de dispositivo como credencial. El sistema consulta a Keycloak para validar la
+identidad de usuarios humanos cuando la autenticación OIDC está habilitada.
+
+\newpage
+
+# Nivel 2 — Contenedores
+
+El nivel de contenedores describe las unidades desplegables del sistema, sus responsabilidades y
+los flujos de comunicación entre ellas.
+
+![Diagrama de contenedores C4 — Nivel 2](img/c4_containers.png)
+
+## Contenedores del sistema
+
+### Servidor de Coordinación
+
+Proceso único desplegado en una instancia cloud, compartido por todos los peers de una
+organización. Expone una API REST y un endpoint WebSocket en el puerto 8080 (TCP). Sus
+responsabilidades son el registro y presencia de peers, la recolección y análisis de métricas de
+red, el descubrimiento de rutas de relay y el control de acceso organizacional.
+
+**Neo4j** actúa como base de datos de grafos para la persistencia del grafo de peers. Cada peer
+se representa como un nodo con sus atributos de conectividad (`udp_host`, `api_url`, `transport_mode`).
+Las relaciones `CONNECTS_TO` entre nodos almacenan los pesos de calidad del enlace (RTT, jitter y
+tasa de pérdida), lo que permite al servidor calcular rutas óptimas de relay ponderadas por la
+calidad de la conexión entre peers.
+
+**Redis** gestiona el estado efímero y operacional: el buffer de métricas recientes de cada peer
+(últimas 10 muestras), los device tokens con su TTL configurable, los scopes de visibilidad por
+grupo, y la presencia de peers mediante claves con tiempo de expiración asociado al heartbeat.
+
+**Keycloak** (opcional) provee identidad federada. El servidor valida los JWT emitidos por
+Keycloak usando el endpoint JWKS del realm correspondiente.
+
+### Agente Local
+
+Proceso Python que se ejecuta en cada máquina participante. Expone el puerto 8000 (TCP) para la
+API HTTP local y el puerto 9001 (UDP) para recibir bloques Reed-Solomon. Encapsula el motor de
+codificación/decodificación RS, la capa de transporte conmutable (UDP/QUIC), el sistema de relay,
+el almacenamiento local y el historial de transferencias.
+
+**SQLite** (embebida en el proceso del agente) persiste el historial de transferencias con todos
+sus metadatos: identificador, dirección, peer remoto, nombre de archivo, tamaño, estado, nivel de
+redundancia efectivo, bloques recuperados, calidad de red y perfil de red utilizado.
+
+### Shell de Escritorio (Electron)
+
+Proceso que envuelve el agente Python y la interfaz web para usuarios desktop. Al iniciar, lanza
+el agente Python como proceso hijo, espera a que su API de salud responda, carga la SPA React
+desde recursos embebidos y expone la URL base del agente al contexto del renderer mediante el
+mecanismo de aislación de contexto de Electron. La interfaz web no realiza llamadas directas al
+servidor central en ningún momento; toda la comunicación pasa por el agente local.
+
+### Interfaz Web (SPA)
+
+Aplicación de página única construida con React. Implementa dos páginas principales: la página de
+conexión inicial (configuración del servidor y autenticación) y el dashboard principal. El
+dashboard integra la lista de peers en tiempo real recibida por WebSocket, el gestor de archivos
+local, el diálogo de transferencia con selector de nivel de redundancia, el historial de
+transferencias y el panel de administración. El panel de administración expone pestañas para la
+gestión de scopes de visibilidad, generación de tokens de invitación, administración de device
+tokens, configuración de relay, visualización del estado de salud de la red (gráficas SVG de
+RTT/jitter/pérdida y tabla del grafo de red) y gestión de políticas de transferencias entrantes.
+
+## Flujos de comunicación
+
+La interfaz web se comunica con el agente local exclusivamente a través de HTTP sobre loopback
+(`127.0.0.1:8000`). Para recibir actualizaciones en tiempo real de la lista de peers, la interfaz
+mantiene una conexión WebSocket permanente con el servidor central. El agente local se comunica
+con el servidor central mediante HTTPS para todas las operaciones de coordinación: registro,
+señales de vida, resolución de dirección de peers, reporte de métricas y consulta de rutas de
+relay. La transferencia de bloques Reed-Solomon entre agentes ocurre directamente sobre UDP (o
+QUIC), sin pasar por el servidor.
+
+\newpage
+
+# Nivel 3 — Componentes
+
+El nivel de componentes describe los módulos internos de los contenedores principales y sus
+responsabilidades.
+
+![Diagrama de componentes C4 — Nivel 3](img/c4_components.png)
+
+## Componentes del Servidor de Coordinación
+
+**Módulo de peers:** implementa el ciclo completo de vida de un peer en el sistema. Recibe las
+solicitudes de registro con los atributos de conectividad del peer, persiste el nodo en Neo4j
+y establece la clave de presencia en Redis con el TTL del heartbeat. Procesa señales de vida
+periódicas que renuevan el TTL. Responde a consultas de resolución de dirección por identificador.
+Gestiona el descubrimiento de peers con capacidad de relay y la configuración de políticas de
+transferencias entrantes por peer. El endpoint WebSocket emite una instantánea actualizada de la
+lista de peers a todos los clientes conectados cada vez que ocurre un cambio de estado.
+
+**Módulo de métricas:** recibe reportes de telemetría de los agentes (RTT, jitter, tasa de
+pérdida) y los almacena en el buffer por peer en Redis. Implementa el motor de recomendación de
+redundancia: promedia las últimas muestras, clasifica la calidad de red según umbrales predefinidos
+y devuelve el nivel de redundancia sugerido. Expone el historial de métricas por peer y la tabla
+del grafo de red para visualización en el panel de administración.
+
+**Módulo de device tokens:** genera tokens de alta entropía para dispositivos headless, los
+persiste en Redis con TTL configurable y permite su revocación inmediata. Un token revocado es
+rechazado en el siguiente request del dispositivo sin necesidad de reinicio del servidor.
+
+**Módulo de invitaciones:** genera tokens de un solo uso que permiten la incorporación de nuevos
+peers. Cada token es válido para un único proceso de registro; al ser consumido se invalida
+automáticamente.
+
+**Middleware de autenticación:** intercepta todas las solicitudes, extrae el JWT del encabezado
+de autorización, valida la firma mediante el endpoint JWKS del proveedor de identidad o contrasta
+el device token contra Redis, y derivar el `org_id` (del campo realm del JWT o del registro del
+token) para aplicar el aislamiento organizacional en todas las consultas subsiguientes.
+
+## Componentes del Agente Local
+
+**Motor Reed-Solomon:** encapsula la lógica de codificación y decodificación. El codificador
+recibe el archivo en memoria, calcula su resumen criptográfico, segmenta el contenido en bloques y
+aplica aritmética de campo de Galois para generar los símbolos de paridad de cada bloque. El
+decodificador colecta bloques indexados, identifica los ausentes, los reconstruye algebraicamente
+y verifica la integridad del archivo reconstruido contra el resumen original.
+
+**Capa de transporte:** presenta una interfaz abstracta unificada sobre dos implementaciones
+concretas. La implementación UDP opera sobre un socket asíncrono sin estado de sesión. La
+implementación QUIC establece una sesión cifrada con TLS 1.3 y transmite los bloques como frames
+DATAGRAM sin retransmisión. Ambas implementaciones comparten el mismo puerto 9001. El transporte
+activo es seleccionable sin reiniciar el agente.
+
+**Motor de relay:** implementa el rol de intermediario cuando la transferencia directa no es
+posible. Colecta bloques en memoria RAM, resuelve el peer destino y reenvía los bloques. Soporta
+tres modalidades de operación (ephemeral, restricted, gateway) que se describen en detalle en la
+sección de flujos de interacción.
+
+**Cliente del servidor:** centraliza toda la comunicación HTTP con el servidor central. Abstrae
+los detalles del protocolo y provee métodos de alto nivel para registro, señales de vida,
+resolución de peers, reporte de métricas y consulta de recomendaciones.
+
+**Sonda de métricas:** proceso en background que mide periódicamente la latencia de round-trip y
+el jitter hacia los peers activos conocidos, y reporta los resultados al servidor para alimentar
+el sistema de recomendación adaptativa.
+
+**Gestión de almacenamiento:** persiste los archivos recibidos en el directorio configurado con un
+índice de integridad SHA-256. El historial de transferencias se almacena en SQLite mediante acceso
+asíncrono, permitiendo consultas sin bloquear la API del agente.
+
+**Gestor del daemon:** implementa los comandos de instalación y control del servicio del sistema
+operativo. Genera las unidades de servicio específicas de cada plataforma y gestiona el archivo de
+variables de entorno del agente.
+
+\newpage
+
+# Nivel 4 — Código
+
+El nivel de código describe la implementación de los componentes en términos de comportamiento y
+algoritmos, sin referenciar nombres específicos de librerías, clases ni archivos.
+
+![Flujo de transferencia C4 — Nivel 4](img/c4_code_transfer.png)
+
+## Codificación y Decodificación Reed-Solomon
+
+### Proceso de codificación
+
+El proceso de codificación comienza al recibir el archivo completo en memoria. En primer lugar,
+se calcula el resumen criptográfico SHA-256 del contenido original; este valor se transmitirá al
+receptor para verificación de integridad posterior. A continuación, el archivo se divide en
+segmentos de tamaño uniforme de `k` bytes; si el último segmento es más corto, se rellena con
+ceros hasta alcanzar el tamaño estándar, y el tamaño original del archivo se registra en el
+encabezado del primer bloque para que el receptor pueda eliminar el relleno al reconstruir.
+
+Para cada segmento se aplica álgebra sobre el cuerpo de Galois GF(2^8^) para producir `n−k`
+bytes adicionales de paridad. La propiedad fundamental de este proceso es que cualquier
+subconjunto de `k` símbolos del total de `n` (originales y de paridad) permite reconstruir
+el segmento completo sin pérdida de información. En el contexto de transmisión UDP, donde se
+conoce con exactitud qué bloques llegaron y cuáles no (modelo de borrado o *erasure*), esta
+propiedad se aprovecha al máximo.
+
+Cada bloque codificado se empaqueta con un encabezado binario de 30 bytes que incluye: el
+identificador único de la transferencia (16 bytes UUID), el índice del bloque, el total de bloques,
+los parámetros `n` y `k`, indicadores de estado (último bloque, presencia de relleno) y, en el
+primer bloque, el tamaño original del archivo.
+
+Los parámetros `n` y `k` se derivan del nivel de redundancia seleccionado por el usuario o
+recomendado por el servidor. Con `n` fijo en 32 y el nivel de redundancia `r` en el rango
+`[0.05, 0.50]`:
 
 ```
-n = 32   (tamaño de bloque estándar)
 k = round(n × (1 − r))
 k = clamp(k, mín=4, máx=n−1)
 ```
 
-| Preset | r | n | k | Paridad | Overhead | Pérdida tolerable |
-|---|---|---|---|---|---|---|
-| Rápido | 0.10 | 32 | 29 | 3 | 10% | 10% |
-| Balanceado | 0.25 | 32 | 24 | 8 | 33% | 25% |
-| Resiliente | 0.50 | 32 | 16 | 16 | 100% | 50% |
+| Nivel r | n | k | Paridad | Pérdida tolerable |
+|---|---|---|---|---|
+| 0.05 | 32 | 30 | 2 | 5% |
+| 0.10 | 32 | 29 | 3 | 10% |
+| 0.25 | 32 | 24 | 8 | 25% |
+| 0.50 | 32 | 16 | 16 | 50% |
 
-El valor de `r` puede ser fijado manualmente por el usuario o determinado automáticamente por
-el sistema de redundancia adaptativa (ver sección 5).
+### Proceso de decodificación
 
-## Flujo de codificación y decodificación
+El receptor colecta bloques a medida que llegan a través del socket. Al conocer el total esperado
+de bloques (indicado en el encabezado de cualquier bloque recibido), el decodificador determina
+con precisión qué índices están ausentes. Para cada bloque recibido, verifica su integridad
+aplicando el proceso de decodificación RS estándar. Para cada bloque ausente, aplica decodificación
+por borrado: utilizando el conjunto de bloques disponibles y las posiciones de los ausentes como
+entrada, el algoritmo resuelve el sistema de ecuaciones sobre GF(2^8^) para reconstruir los datos
+originales.
 
-El archivo se divide en bloques de `k` bytes. Cada bloque se codifica con RS para obtener `n`
-bytes (incluida la paridad). Cada bloque codificado se envía como un datagrama UDP. En el
-receptor, los bloques que llegan se decodifican con RS; los que faltan se marcan como erasures
-y se reconstruyen algebraicamente.
+Una vez procesados todos los bloques, los segmentos se concatenan en orden y se elimina el relleno
+del último segmento usando el tamaño original registrado en el encabezado. Se calcula el SHA-256
+del archivo reconstruido y se contrasta contra el valor provisto por el emisor. El resultado de
+la transferencia se determina según la siguiente tabla:
+
+| Condición | Estado resultante |
+|---|---|
+| Sin pérdidas, SHA-256 coincide | `ok` |
+| Pérdidas recuperadas por RS, SHA-256 coincide | `degraded` |
+| Pérdidas superan capacidad RS, o SHA-256 no coincide | `failed` |
+| Recibido a través de un peer intermediario | `relayed` |
 
 ![Flujo del algoritmo Reed-Solomon](img/rs_algorithm.png)
 
-## Verificación de integridad
+## Capa de Transporte UDP/QUIC
 
-El emisor calcula el **SHA-256** del archivo original antes de codificarlo y lo envía junto con la
-solicitud de transferencia. El receptor verifica el checksum sobre los bytes reconstruidos:
+### Abstracción de transporte
 
-| Resultado | Condición |
-|---|---|
-| `ok` | Todos los bloques llegaron, SHA-256 coincide |
-| `degraded` | Pérdidas recuperadas por RS, SHA-256 coincide — el archivo es íntegro |
-| `failed` | Pérdidas superan la capacidad RS, o SHA-256 no coincide |
+Ambas implementaciones de transporte exponen la misma interfaz con cuatro operaciones: iniciar la
+escucha en el puerto configurado, enviar un bloque a una dirección destino, colectar el siguiente
+bloque recibido y detener el transporte. Esta abstracción permite al motor RS y al orquestador
+de transferencias operar sin conocer los detalles del protocolo subyacente.
 
-\newpage
+### Transporte UDP
 
-# Arquitectura del Sistema
+La implementación UDP utiliza un socket de datagrama asíncrono. No hay estado de sesión: cada
+bloque RS se transmite como un datagrama independiente sin handshake previo ni confirmación de
+entrega. La ausencia de sobrecarga de conexión minimiza la latencia de inicio de transferencia.
+La pérdida de datagramas es gestionada por el motor RS mediante el modelo de borrado.
 
-## Plano de control vs. plano de datos
+### Transporte QUIC
 
-El diseño central de RockDove separa la coordinación de la transferencia en dos planos
-completamente independientes:
+La implementación QUIC establece una sesión cifrada con TLS 1.3 sobre el mismo puerto UDP. Los
+bloques RS se transmiten como frames de tipo DATAGRAM definidos en el RFC 9221, que son frames
+sin retransmisión dentro de una sesión QUIC. Esta característica es deliberada: si QUIC
+retransmitiera automáticamente los frames perdidos, interferiría con el modelo de borrado de RS.
+Al usar frames DATAGRAM, QUIC aporta cifrado y autenticación de la sesión sin alterar la
+semántica de pérdida que RS requiere.
 
-**Plano de control — servidor central (una instancia en cloud):**
-gestiona identidad, presencia de peers y telemetría de red. **Nunca toca archivos ni interviene
-en la transferencia.**
+Al iniciarse en modo QUIC, el agente genera automáticamente un certificado TLS autofirmado cuyo
+nombre común incluye el identificador único del peer. Este certificado se almacena de forma
+persistente; si el identificador del peer cambia entre arranques, el certificado anterior se
+descarta y se genera uno nuevo.
 
-**Plano de datos — agente por máquina:**
-cada participante corre un agente local que realiza RS encoding/decoding, maneja el socket UDP
-y almacena archivos en el filesystem local.
+### Protocolo de identidad CERT_HELLO
 
-El dato transferido **nunca pasa por el servidor**. El servidor solo responde a dos preguntas:
-*"¿dónde está el peer B?"* y *"¿qué redundancia conviene según la red actual?"*
-La transferencia es directa, máquina a máquina, sobre UDP.
+Antes de enviar los bloques RS, el emisor transmite un frame especial denominado CERT_HELLO. Este
+frame transporta la identidad criptográfica del emisor: un valor mágico de identificación de
+protocolo, la versión del protocolo, el identificador del peer emisor, el identificador único de la
+transferencia y el resumen SHA-256 del certificado TLS del emisor. El receptor identifica este
+frame por el valor mágico y, antes de procesar cualquier bloque RS, registra la conexión como
+pendiente con los metadatos extraídos.
 
-```
-Una instancia cloud:    Servidor RockDove — coordinación + métricas
-Cada máquina de usuario: Agente Python + interfaz Electron
-Dispositivos IoT/edge:   Agente Python headless en Docker
-```
+El operador del peer receptor puede aprobar o rechazar la conexión entrante desde la interfaz antes
+de que los bloques sean procesados. Si no hay interacción en 30 segundos, la conexión se aprueba
+automáticamente para no bloquear transferencias en entornos desatendidos. Un rechazo descarta
+todos los bloques recibidos y marca la transferencia como fallida.
 
-## Analogía: servidor de coordinación estilo Tailscale
+## Sistema de Relay
 
-El patrón es idéntico al de herramientas como **Tailscale** o **Syncthing**:
+Cuando el agente emisor no puede alcanzar directamente al receptor (falla de conectividad, NAT
+simétrico, red segmentada), recurre a un peer intermediario con capacidad de relay.
 
-| Componente | Tailscale | RockDove |
-|---|---|---|
-| Servidor de coordinación | `login.tailscale.com` | Servidor central (cloud) |
-| Lo que ve el servidor | Claves públicas, IPs | Peer IDs, IPs UDP, métricas de red |
-| Lo que NO ve el servidor | Tráfico de red | Archivos transferidos |
-| Comunicación entre peers | WireGuard directo | UDP + Reed-Solomon directo |
-| Descubrimiento de peers | DERP / coordination server | `/peers/register` + WebSocket push |
+El proceso de relay opera en tres etapas. En la primera, el emisor solicita al servidor la
+identificación de un peer relay disponible, o consulta las rutas estáticas configuradas localmente.
+En la segunda, el emisor establece contacto con el relay e inicia la transferencia indicando el
+peer destino final. En la tercera, el relay colecta los bloques RS en memoria RAM, resuelve la
+dirección del destino final y reenvía los bloques como si fuera el emisor original.
 
-En Tailscale el coordination server permite que dos dispositivos en redes distintas establezcan
-un túnel directo. En RockDove, el servidor central permite que dos peers se encuentren y luego
-transfieran archivos **directamente por UDP** sin intermediarios.
+Los peers relay pueden operar en tres modalidades complementarias:
 
-## Diagrama de infraestructura
+**Ephemeral:** los bloques se mantienen exclusivamente en memoria RAM durante el proceso de
+reenvío. Si el proceso del relay se detiene antes de completar el reenvío, los bloques se pierden
+y la transferencia falla. Esta modalidad prioriza la privacidad sobre la resiliencia.
 
-![Diagrama de arquitectura del sistema](img/architecture.png)
+**Restricted:** el relay solo acepta solicitudes de reenvío hacia peers incluidos en una lista
+de destinos autorizados configurada explícitamente. Solicitudes hacia destinos no autorizados
+son rechazadas con un error descriptivo.
 
-El diagrama muestra tres tipos de participantes: peers desktop (Electron + agente Python),
-nodos edge headless (Docker), y el servidor central con sus servicios internos (Redis, Keycloak).
-Las flechas continuas representan comunicación HTTPS con el servidor; la flecha gruesa entre peers
-representa la transferencia UDP directa de bloques Reed-Solomon.
+**Gateway:** el relay resuelve destinos mediante rutas estáticas configuradas localmente, sin
+necesidad de consultar al servidor central por TCP. Esta modalidad permite la operación del relay
+en entornos sin conectividad al servidor, como redes industriales aisladas.
 
-\newpage
+## Redundancia Adaptativa
 
-# Servidor de Rendezvous
+El sistema ajusta dinámicamente el nivel de redundancia de cada transferencia en función de las
+condiciones de red medidas en ambos extremos del enlace.
 
-El servidor central actúa como **punto de encuentro** (*rendezvous server*): permite que los peers
-se encuentren en la red sin conocerse de antemano, y recoge telemetría para alimentar el sistema
-de redundancia adaptativa. Está implementado en **Python 3.12 + FastAPI**, expone el puerto 8080,
-y persiste todo su estado en **Redis**.
+### Ciclo de medición
 
-## Registro de peers y presencia
+El agente ejecuta un proceso en background que, cada 60 segundos, mide la latencia de round-trip
+y el jitter hacia cada peer activo conocido mediante múltiples sondas HTTP. Los resultados se
+reportan al servidor, que los almacena en un buffer de las últimas 10 muestras por peer.
+Adicionalmente, al finalizar cada transferencia, el agente calcula la tasa de pérdida real
+observada (proporción de bloques que requirieron reconstrucción RS) y la reporta al servidor.
 
-Cuando un agente arranca:
+### Algoritmo de recomendación
 
-1. Llama a `POST /peers/register` con `{peer_id, udp_host, udp_port, api_url, network_hint}`.
-2. El servidor almacena el registro como un **hash en Redis** con TTL = 30 segundos.
-3. El servidor transmite inmediatamente el snapshot actualizado a todos los observadores WebSocket.
-4. El agente inicia un **heartbeat loop** cada 15 segundos (`POST /peers/{id}/heartbeat`).
-5. El heartbeat renueva el TTL del hash. Si el peer deja de latir, Redis expira la clave
-   automáticamente y la próxima broadcast lo omite.
+Antes de iniciar una transferencia, el agente consulta al servidor la recomendación de redundancia
+para ambos extremos del enlace en paralelo. El servidor promedia las muestras disponibles del
+buffer de cada peer y clasifica la calidad del enlace según la siguiente tabla:
 
-Si el servidor se reinicia, Redis recupera todos los peers registrados (el estado persiste).
-Si un peer reinicia, detecta el 404 en el próximo heartbeat y se re-registra automáticamente.
-
-## Autodescubrimiento en tiempo real: WebSocket push
-
-La UI React se conecta a `GET /peers/watch` mediante WebSocket permanente. El servidor hace
-broadcast de la lista completa cada vez que hay un cambio (registro, heartbeat, expiración).
-Esto significa que cuando un colega abre RockDove en otra máquina, aparece en el dashboard en
-menos de un segundo, sin polling.
-
-| Evento | Acción del servidor |
-|---|---|
-| Nuevo peer se registra | broadcast snapshot completo |
-| Heartbeat recibido | broadcast (actualiza `last_seen`) |
-| Peer expira por timeout | broadcast (el peer desaparece de la lista) |
-| UI se conecta por primera vez | envía snapshot inmediato |
-
-## Resolución de dirección para transferencia
-
-Cuando el agente A quiere transferir a B:
-
-1. Consulta **una sola vez** al servidor: `GET /peers/B`
-2. El servidor responde con `{udp_host, udp_port}` — la dirección donde B escucha UDP.
-3. A partir de ahí, A envía los bloques RS **directamente** al socket UDP de B.
-4. El servidor no interviene en el resto.
-
-![Flujo de coordinación y autodescubrimiento](img/peer_discovery.png)
-
-## Persistencia con Redis
-
-Todos los datos del servidor se almacenan en **Redis**:
-
-| Dato | Clave Redis | Estructura | TTL |
-|---|---|---|---|
-| Peer registrado | `peer:{org}:{id}` | Hash | 30 s (heartbeat) |
-| Métricas por peer | `metrics:{peer_id}` | List (últimas 10) | Sin expiración |
-| Device token | `device_token:{valor}` | Hash | Según configuración |
-| Scopes de grupo | `scope:{org_id}` | String JSON | Sin expiración |
-
-Esta arquitectura garantiza que un reinicio del servidor no pierde datos: los peers re-registran
-en el próximo heartbeat; las métricas acumuladas y los device tokens persisten.
-
-\newpage
-
-# Redundancia Adaptativa
-
-## Motivación
-
-Un nivel de redundancia fijo ignora las condiciones reales de la red. Demasiado bajo en un link
-degradado produce transferencias fallidas. Demasiado alto en una LAN desperdicia ancho de banda.
-El sistema mide condiciones de red continuamente y ajusta el default del slider en cada
-transferencia.
-
-## Ciclo de medición y recomendación
-
-Dos fuentes de datos alimentan el sistema:
-
-**Sonda RTT en background:** el agente ejecuta un loop cada 60 segundos que mide la latencia HTTP
-hacia cada peer online (5 pings, promedio + jitter). Los resultados se reportan al servidor vía
-`POST /metrics/report`.
-
-**Métricas de transferencia:** al finalizar cada envío, el agente calcula la tasa de pérdida real
-(`recovered_blocks / total_blocks`) y el tiempo total de transmisión, y los reporta al servidor.
-
-El servidor mantiene las **últimas 10 muestras** por peer en Redis. Al recibir una solicitud de
-recomendación, promedia esas muestras y aplica la tabla de calidad:
-
-![Sistema de redundancia adaptativa](img/adaptive_redundancy.png)
-
-## Tabla de calidad de red
-
-| Calidad | Pérdida | RTT | Jitter | Redundancia sugerida |
+| Calidad | Pérdida | RTT | Jitter | Redundancia recomendada |
 |---|---|---|---|---|
 | Excellent | < 1% | < 50 ms | < 5 ms | 5% |
 | Good | < 5% | < 150 ms | < 20 ms | 10% |
 | Fair | < 15% | < 500 ms | < 80 ms | 25% |
 | Poor | < 30% | < 1000 ms | < 200 ms | 40% |
-| Critical | cualquier peor | — | — | 50% |
+| Critical | cualquier valor peor | — | — | 50% |
 
-## Recomendación dual: emisor y receptor
-
-Antes de cada transferencia, el agente emisor consulta la recomendación para **ambos extremos**
-del enlace en paralelo:
+El agente emisor aplica el nivel de redundancia más alto entre las recomendaciones del emisor y
+del receptor. Esta lógica garantiza que la protección se dimensiona según el enlace más débil:
 
 ```
-rec_emisor  = GET /metrics/recommendation/{mi_peer_id}
-rec_receptor = GET /metrics/recommendation/{target_peer_id}
-
-redundancia_efectiva = max(rec_emisor, rec_receptor)
+redundancia_efectiva = max(recomendación_emisor, recomendación_receptor)
 ```
 
-Si cualquiera de los dos extremos tiene condiciones de red degradadas, la redundancia se eleva
-para proteger la transferencia. El resultado (nivel efectivo, calidad y perfil de red) se incluye
-en la respuesta de la transferencia para que la UI lo muestre al usuario.
+Si no hay muestras acumuladas para alguno de los peers (primer uso), el sistema utiliza el nivel
+conservador del 25% como valor de referencia.
 
-## Comportamiento en la UI
+![Sistema de redundancia adaptativa](img/adaptive_redundancy.png)
 
-Al abrir el diálogo de transferencia, el agente consulta la recomendación y precarga el slider con
-el valor sugerido. El usuario puede ajustar manualmente. Si no hay datos de métricas acumulados
-aún (primer uso), el sistema usa **0.25 (25%)** como fallback conservador.
+## Control de Acceso y Autenticación
 
-\newpage
+El sistema implementa tres modalidades de autenticación que pueden coexistir en el mismo
+despliegue sin cambios de código.
 
-# Autenticación y Control de Acceso
+### Modo de desarrollo
 
-El sistema soporta tres modalidades de autenticación que pueden coexistir en el mismo despliegue:
+Cuando la integración con el proveedor de identidad externo está deshabilitada, cualquier peer
+puede registrarse sin presentar credenciales. Todos los peers registrados pertenecen a la
+organización de desarrollo y son visibles entre sí. Esta modalidad está destinada exclusivamente
+a entornos de desarrollo local y pruebas de concepto.
 
-## Modo desarrollo (sin OIDC)
+### Autenticación federada con OIDC y PKCE
 
-Cuando `OIDC_ENABLED=false`, cualquier peer puede registrarse sin credenciales. Todos los peers
-quedan en la misma organización (`dev`) y se ven entre sí. Apropiado para desarrollo local y
-pruebas de concepto.
+En entornos de producción con usuarios humanos, el sistema integra con un proveedor de identidad
+externo mediante el protocolo OpenID Connect. El flujo utiliza la extensión PKCE (*Proof Key for
+Code Exchange*), diseñada para aplicaciones de escritorio que no pueden guardar secretos de
+cliente de forma segura.
 
-## Autenticación OIDC con Keycloak (usuarios humanos)
-
-En producción, el sistema integra con **Keycloak** como proveedor de identidad OpenID Connect.
-El flujo utiliza PKCE (*Proof Key for Code Exchange*), que permite autenticación segura desde
-una aplicación de escritorio:
-
-1. El usuario hace clic en "Iniciar sesión" en la UI.
-2. La app genera la URL de autorización con PKCE y la abre en el **browser del sistema**.
-3. El usuario se autentica en Keycloak. El browser redirige a `http://127.0.0.1:8000/auth/callback`.
-4. El agente local recibe el código de autorización.
-5. La UI completa el intercambio código → JWT via `signinCallback()`.
-6. La UI entrega el JWT al agente (`POST /auth/token`). El agente lo usa para re-registrarse.
-
-El **JWT de Keycloak** contiene `sub` (→ peer_id), `iss` (→ org_id derivado del realm), y
-`groups` (→ grupos del usuario). La aislación multi-tenant se implementa por realm: peers de
-distintas organizaciones no se ven entre sí aunque compartan el mismo servidor central.
-
-## Device tokens para agentes headless
-
-Para dispositivos IoT y nodos edge que no tienen usuario interactivo, el sistema provee
-**device tokens**: credenciales autogeneradas por el servidor, únicas por dispositivo,
-almacenadas en Redis y revocables en cualquier momento desde el panel de administración.
-
-### Formato del token
-
-```
-rd_<43 caracteres Base64URL>   (256 bits de entropía)
-```
-
-El valor es generado por el servidor con `secrets.token_urlsafe(32)`. El prefijo `rd_` permite
-identificarlo visualmente. El valor completo solo se muestra una vez, en el momento de creación.
-
-### Ciclo de vida
-
-| Estado | Cómo ocurre |
-|---|---|
-| Activo | Inmediatamente después de la creación |
-| Expirado | Automáticamente cuando Redis expira las claves (TTL configurado en días) |
-| Revocado | Admin llama `DELETE /device-tokens/{id}` — efecto inmediato |
-
-Los tokens pueden ser **temporales** (con TTL en días) o **indefinidos** (sin expiración). Redis
-expira automáticamente los tokens temporales sin necesidad de tareas programadas.
-
-### Flujo de autenticación de un dispositivo headless
+El proceso completo se ilustra en el siguiente diagrama:
 
 ![Flujo de autenticación OIDC y device tokens](img/auth_flow.png)
 
-El administrador crea el token desde el panel, lo comunica al operador del dispositivo, y el
-operador lo configura como variable de entorno. A partir de ahí, el agente headless se registra
-y mantiene su heartbeat usando el token como Bearer en cada request.
+El agente genera un par de valores criptográficos (verificador y desafío), construye la URL de
+autorización incluyendo el desafío, y la abre en el navegador del sistema operativo. El usuario
+se autentica en el proveedor de identidad. El navegador redirige a un endpoint local del agente
+que recibe el código de autorización. El agente intercambia el código por un JWT presentando el
+verificador. El JWT resultante contiene el identificador del usuario, el realm de origen (que
+determina la organización a la que pertenece el peer) y los grupos del usuario. El agente usa este
+JWT para registrarse en el servidor central y para todas las operaciones subsiguientes.
 
-## Gestión de grupos y scopes
+La aislación entre organizaciones se implementa a nivel de realm: el servidor extrae el realm del
+campo `iss` del JWT y lo usa como `org_id` en todas las consultas. Los peers de distintos realms
+son completamente invisibles entre sí aunque compartan el mismo servidor central.
 
-El sistema implementa aislación a dos niveles dentro de una organización:
+### Device tokens para dispositivos headless
 
-**Nivel 1 — org_id:** derivado del realm de Keycloak. Los peers de distintos realms son
-completamente invisibles entre sí.
+Para dispositivos IoT y nodos edge que operan sin usuario interactivo, el sistema provee tokens de
+dispositivo: credenciales de alta entropía (256 bits, generadas con un generador de números
+pseudoaleatorios criptográficamente seguro) con el prefijo visual `rd_`. El administrador genera
+el token desde el panel de administración y lo entrega al operador del dispositivo, quien lo
+configura como variable de entorno. El token solo se muestra en texto claro en el momento de su
+creación; a partir de entonces, el servidor almacena únicamente su representación procesada para
+verificación.
 
-**Nivel 2 — grupos:** dentro de una misma org, el administrador configura qué grupos pueden
-verse entre sí. El centinela `__all__` otorga visibilidad sobre toda la org (para usuarios admin).
+Los tokens pueden configurarse como temporales (con tiempo de expiración administrado por la base
+de datos en memoria del servidor) o indefinidos. La revocación es inmediata: eliminar el token del
+servidor hace que el siguiente request del dispositivo sea rechazado sin reinicio de ningún proceso.
 
-\newpage
+### Política de transferencias entrantes
 
-# Flujos de Usuario
+Cada peer puede configurar su política de recepción mediante la variable de entorno
+`INCOMING_POLICY`: aceptar todas las transferencias, rechazar todas, mantener una lista de remitentes
+aceptados o una lista de remitentes rechazados. El administrador de la organización puede
+sobreescribir esta política para cualquier peer específico desde el servidor central, lo que permite
+gestión centralizada de políticas de acceso.
 
-## Flujo principal: arranque, carga y transferencia
+## Servicio de Daemon y Modo Headless
 
-El siguiente diagrama muestra las tres operaciones centrales: registro del peer al arrancar la
-app, subida de un archivo al almacenamiento local del agente, y transferencia P2P con redundancia
-adaptativa.
+### Daemon del agente
 
-![Flujo de interacción del usuario](img/user_flow.png)
+El agente puede instalarse como servicio del sistema operativo mediante comandos de gestión del
+daemon. El proceso de instalación genera la unidad de servicio adecuada para la plataforma
+detectada: una unidad de usuario de systemd en Linux, un agente de arranque por usuario en macOS,
+o una tarea programada activada por inicio de sesión en Windows.
 
-## Historial de transferencias
+La configuración del agente (variables de entorno) se almacena en un archivo de entorno dedicado
+cuya ubicación sigue las convenciones de cada plataforma. Esto permite actualizar la configuración
+sin regenerar la unidad de servicio. En Linux, el archivo de entorno se ubica en el directorio de
+configuración del usuario; en macOS, en el plist del agente de arranque.
 
-Cada transferencia (enviada o recibida) queda registrada en una base de datos **SQLite local**
-del agente (`transfers.db`). El historial persiste entre reinicios de la aplicación. La UI
-consume `GET /transfer/history?limit=50` para mostrar las transferencias pasadas con sus
-metadatos: peer destino, archivo, bytes, estado, redundancia efectiva, calidad de red y timestamp.
-
-## Flujo para nodo headless (IoT / edge)
-
-Un nodo edge corre el agente en Docker sin interfaz web. La transferencia puede iniciarse desde
-cualquier peer desktop que tenga al nodo edge en su lista. El nodo edge:
-
-1. Se registra con su device token al arrancar el contenedor.
-2. Mantiene heartbeat automático cada 15 segundos.
-3. Recibe transferencias UDP entrantes y las almacena localmente.
-4. Aparece como peer online en el dashboard de los usuarios desktop.
-
-No requiere ninguna interacción manual una vez desplegado.
-
-\newpage
-
-# Componentes del Sistema
-
-## Servidor Central
-
-| Atributo | Valor |
-|---|---|
-| Runtime | Python 3.12 + FastAPI |
-| Puerto | 8080 TCP |
-| Persistencia | Redis 7 |
-| Auth | Keycloak 24 (OIDC, opcional) |
-| Deploy | Docker Compose |
-
-**Módulos principales:**
-
-| Módulo | Responsabilidad |
-|---|---|
-| `peers/` | Registro, heartbeat, resolución de dirección, WebSocket push |
-| `metrics/` | Recolección de telemetría, cálculo de recomendaciones |
-| `device_tokens/` | Creación, listado y revocación de tokens por dispositivo |
-| `invites/` | Tokens de invitación de un solo uso para incorporación peer-a-peer |
-| `auth/` | Validación de JWT via JWKS de Keycloak, extracción de org_id y groups |
-
-## Agente Local
-
-| Atributo | Valor |
-|---|---|
-| Runtime | Python 3.12 + FastAPI |
-| Puerto HTTP | 8000 |
-| Puerto UDP | 9001 |
-| Almacenamiento | Filesystem local + SQLite |
-| Deploy | AppImage (desktop) o Docker (headless) |
-
-**Módulos principales:**
-
-| Módulo | Responsabilidad |
-|---|---|
-| `rs/encoder.py` | Segmentación en bloques, RS encode, construcción de datagramas UDP |
-| `rs/decoder.py` | Colección de bloques recibidos, RS decode con erasure positions, SHA-256 |
-| `rs/transport.py` | Socket UDP async — envío y recepción de datagramas |
-| `storage/store.py` | Almacenamiento local de archivos con checksum SHA-256 |
-| `storage/db.py` | Historial de transferencias en SQLite via aiosqlite |
-| `metrics/probe.py` | Sonda RTT/jitter en background cada 60 segundos |
-| `server_client.py` | Toda la comunicación HTTP con el servidor central |
-| `transfers/router.py` | Endpoints `/transfer/*` — envío, recepción, historial |
-
-## Interfaz Electron (Desktop)
-
-El proceso principal de Electron:
-
-1. Inicia el agente Python como proceso hijo y espera a que `/health` responda.
-2. Carga la React SPA desde los recursos embebidos del binario.
-3. Expone `window.rsAgent.baseUrl` al renderer via `contextBridge` (sin IPC para calls de API).
-
-La UI React (Vite + Tailwind CSS) se comunica exclusivamente con el agente local en
-`127.0.0.1:8000`. No hay llamadas directas al servidor central desde el frontend.
-
-\newpage
-
-# Infraestructura y Deployment
-
-## Servidor central (Docker Compose)
-
-```bash
-cd server && docker compose up --build
-```
-
-El compose incluye tres servicios:
-
-| Servicio | Imagen | Puerto |
+| Plataforma | Mecanismo de daemon | Archivo de configuración |
 |---|---|---|
-| `server` | Build local (Python + FastAPI) | 8080 TCP |
-| `redis` | redis:7-alpine | 6379 TCP |
-| `keycloak` | keycloak:24 | 8081 TCP (opcional) |
+| Linux | systemd `--user` unit | `~/.config/rockdove/agent.env` |
+| macOS | LaunchAgent plist | Variables integradas en el plist |
+| Windows | schtasks ONLOGON | Variables en la definición de la tarea |
 
-## Cliente desktop (AppImage / ejecutable)
+### Agrupación por propietario
 
-El cliente se distribuye como un ejecutable standalone generado con **electron-builder**:
+La variable de entorno `PEER_OWNER` permite agrupar visualmente múltiples peers pertenecientes al
+mismo usuario o equipo en la interfaz. Esta capacidad es especialmente útil en organizaciones donde
+un mismo usuario opera varios dispositivos (computadora de escritorio, laptop, servidor personal),
+permitiendo identificar de un vistazo todos los peers de un propietario sin necesidad de
+convenciones de nomenclatura en el identificador del peer.
 
-| Plataforma | Artefacto |
-|---|---|
-| Linux | `.AppImage` (autocontenido) |
-| Windows | Instalador NSIS `.exe` |
-| macOS | `.dmg` |
+\newpage
 
-El artefacto incluye: shell Electron, React UI compilada, y agente Python congelado con
-**PyInstaller**. No requiere Python, Node ni ninguna dependencia preinstalada en el dispositivo
-del usuario final.
+# Flujos de Interacción
 
-```bash
-cd client
-./scripts/build-agent.sh   # PyInstaller → agente congelado
-npm run dist:local          # electron-builder → AppImage
-```
+Esta sección describe los flujos operativos principales del sistema, desde el registro inicial de
+un peer hasta la transferencia de archivos con redundancia adaptativa.
 
-## Nodo headless (IoT / edge)
+## Registro y descubrimiento de peers
 
-Dos opciones de despliegue para dispositivos sin interfaz gráfica:
+Al iniciar, el agente ejecuta el siguiente flujo de registro:
 
-**Docker Compose (recomendado):**
+1. El agente verifica si dispone de credenciales válidas (JWT activo o device token configurado).
+   Si no dispone de credenciales y la autenticación OIDC está habilitada, inicia el flujo PKCE.
+2. El agente llama al endpoint de registro del servidor, presentando su identificador único, la
+   URL HTTP por la que puede ser contactado, la dirección y puerto UDP por los que recibe bloques,
+   el modo de transporte activo y el perfil de red configurado.
+3. El servidor persiste el nodo del peer en el grafo y establece su clave de presencia con el TTL
+   del heartbeat (30 segundos por defecto).
+4. El servidor emite una actualización a todos los clientes WebSocket conectados, haciendo que el
+   nuevo peer aparezca en los dashboards de los peers de la misma organización en tiempo real.
+5. El agente inicia un proceso en background que envía señales de vida al servidor cada 15 segundos.
+   Cada señal de vida renueva el TTL. Si el agente se detiene, el TTL expira y el peer desaparece
+   automáticamente de la lista de peers activos.
 
-```bash
-# .env del dispositivo (generado por el admin panel)
-PEER_ID=sensor-planta-a
-SERVER_URL=http://servidor:8080
-AGENT_API_URL=http://192.168.1.50:8000
-AGENT_SERVICE_TOKEN=rd_xK3mAb9dQpWnLcVt...
+![Flujo de descubrimiento de peers](img/peer_discovery.png)
 
-docker compose -f docker-compose.headless.yml up -d
-```
+## Transferencia P2P directa
 
-**Binario AppImage (sin Docker):**
+El flujo completo de una transferencia directa entre dos peers comprende tres fases:
 
-```bash
-PEER_ID=sensor-a \
-SERVER_URL=http://servidor:8080 \
-AGENT_SERVICE_TOKEN=rd_xK3m... \
-./rockdove-agent.AppImage
-```
+**Fase de preparación:** el agente emisor consulta al servidor la recomendación de redundancia para
+ambos extremos del enlace en paralelo. Calcula el nivel efectivo como el máximo de las dos
+recomendaciones. Consulta la dirección UDP del peer receptor. Codifica el archivo con el nivel de
+redundancia efectivo y calcula el SHA-256 del contenido original.
 
-El agente headless se registra automáticamente al arrancar, mantiene heartbeat, y si el servidor
-se reinicia se vuelve a registrar en el próximo ciclo sin intervención humana.
+**Fase de transferencia:** el emisor notifica al receptor de la transferencia entrante enviando los
+metadatos (identificador de transferencia, total de bloques, parámetros RS, SHA-256 del archivo
+y nombre del archivo). Si el receptor responde con aceptación, el emisor inicia el envío de los
+bloques RS sobre UDP. Cada bloque se transmite como un datagrama independiente con su encabezado
+de identificación y los `n` bytes de datos codificados.
 
-## Variables de configuración del agente
+**Fase de reconstrucción:** el receptor colecta los bloques durante el tiempo de espera configurado
+(30 segundos). Al recibir el último bloque o al expirar el tiempo de espera, aplica el proceso de
+decodificación RS, verifica la integridad con SHA-256 y almacena el archivo. El estado resultante
+(`ok`, `degraded` o `failed`) se registra en el historial local y se comunica al emisor.
 
-| Variable | Descripción | Default |
-|---|---|---|
-| `SERVER_URL` | URL del servidor central | `http://localhost:8080` |
-| `PEER_ID` | Identificador único de este peer | `default-peer` |
-| `AGENT_API_URL` | URL HTTP pública de este agente (registrada en el servidor) | autodetectada |
-| `UDP_PORT` | Puerto UDP para recibir bloques RS | `9001` |
-| `STORAGE_PATH` | Ruta de almacenamiento local | `~/.local/share/rockdove` |
-| `AGENT_SERVICE_TOKEN` | Device token autogenerado por el admin | vacío |
-| `NETWORK_HINT` | Perfil de red: `lan`, `wifi`, `cellular`, `satellite`, `auto` | `auto` |
+## Fallback a relay
 
-## Consideraciones de red
+Cuando el emisor no puede alcanzar directamente al receptor, el sistema ejecuta el siguiente flujo
+de fallback:
 
-El puerto **9001 UDP debe ser accesible entre peers** para recibir transferencias. Si hay NAT,
-se necesita port forwarding o que ambos peers estén en la misma red (o VPN).
-
-La variable `AGENT_API_URL` debe apuntar a la **IP alcanzable por los otros peers**, no a
-`127.0.0.1`. Es la dirección que el servidor entrega a otros peers cuando la consultan.
-
-El servidor central solo requiere **8080 TCP** abierto. No necesita acceso UDP.
+1. El emisor intenta contactar al receptor; la solicitud falla con error de conectividad.
+2. El emisor consulta al servidor la lista de peers con capacidad de relay activos en la misma
+   organización, o consulta sus rutas estáticas locales.
+3. El emisor selecciona un relay y le notifica la transferencia con el identificador del destinatario
+   final.
+4. El relay acepta la transferencia y resuelve la dirección del destinatario final consultando al
+   servidor o sus rutas estáticas.
+5. El emisor envía los bloques RS al relay. El relay los colecta en memoria y los reenvía al
+   destinatario.
+6. El destinatario recibe los bloques, reconstruye el archivo y registra la transferencia con el
+   estado `relayed`.
 
 \newpage
 
 # Stack Tecnológico
 
+La siguiente tabla lista todas las tecnologías utilizadas en el sistema, con su versión de
+referencia y el rol que cumplen. Esta es la única sección del informe que hace referencia a nombres
+específicos de tecnologías, librerías y frameworks.
+
 | Capa | Tecnología | Versión | Rol |
 |---|---|---|---|
-| Servidor central | Python + FastAPI | 3.12 / 0.115 | API REST + WebSocket |
-| Persistencia servidor | Redis | 7 | Peers, métricas, device tokens |
-| Auth / SSO | Keycloak | 24 | OIDC, multi-tenant, PKCE |
-| Agente local | Python + FastAPI | 3.12 / 0.115 | RS engine, UDP, storage |
-| FEC | reedsolo | 1.7 | Reed-Solomon GF(2^8^) |
-| HTTP client (agente) | httpx | 0.28 | Llamadas async al servidor |
-| Historial transferencias | aiosqlite | 0.22 | SQLite async en el agente |
-| Shell desktop | Electron | 33 | Empaquetado + spawn del agente |
-| UI | React + Vite + Tailwind CSS | 18 / 5 / 3 | SPA cargada por Electron |
-| Empaquetado agente | PyInstaller | 6 | Congela Python en binario |
-| Empaquetado desktop | electron-builder | 25 | Genera AppImage / exe / dmg |
-| Gestión deps Python | uv | latest | Lockfile reproducible |
-| Contenedores | Docker + Compose | 27 | Servidor + nodos headless |
+| Servidor central | Python + FastAPI | 3.12 / 0.115 | API REST, WebSocket, validación de modelos |
+| Grafo de red | Neo4j | 5 | Persistencia del grafo de peers y pesos de enlace |
+| Estado operacional | Redis | 7 | Métricas, presencia de peers, device tokens, org scopes |
+| Identidad federada | Keycloak | 24 | OIDC, multi-tenant, PKCE, gestión de realms y grupos |
+| Agente local | Python + FastAPI | 3.12 / 0.115 | Motor RS, transporte UDP/QUIC, storage, daemon |
+| Algoritmo FEC | reedsolo | 1.7 | Implementación Reed-Solomon sobre GF(2^8^) |
+| Transporte QUIC | aioquic | 1.x | QUIC (RFC 9000) con extensión DATAGRAM (RFC 9221) |
+| Certificados TLS | cryptography | 44 | Generación de certificados autofirmados para QUIC |
+| Cliente HTTP agente | httpx | 0.28 | Comunicación asíncrona con el servidor central |
+| Historial local | aiosqlite | 0.22 | Acceso asíncrono a SQLite para el historial |
+| Shell de escritorio | Electron | 33 | Empaquetado de escritorio, spawn del agente |
+| Interfaz de usuario | React + Vite + Tailwind CSS | 18 / 5 / 3 | SPA del dashboard y panel de administración |
+| Empaquetado del agente | PyInstaller | 6 | Congela el agente Python en binario autocontenido |
+| Empaquetado desktop | electron-builder | 25 | Genera AppImage (Linux), exe (Windows), dmg (macOS) |
+| Gestión de dependencias | uv | latest | Lockfile reproducible para el entorno Python |
+| Contenedores | Docker + Compose | 27 | Despliegue del servidor y nodos headless |
 
-## Librerías clave del servidor
+\newpage
 
-| Librería | Uso |
-|---|---|
-| `fastapi` | Framework HTTP + WebSocket + validación automática via Pydantic |
-| `redis[asyncio]` | Cliente Redis async para persistencia de peers y métricas |
-| `PyJWT[crypto]` | Validación de JWTs de Keycloak (RS256, JWKS fetch) |
-| `pydantic-settings` | Configuración via variables de entorno con tipos |
+# Infraestructura y Despliegue
 
-## Librerías clave del agente
+## Perfiles de despliegue
 
-| Librería | Uso |
-|---|---|
-| `reedsolo` | Implementación de Reed-Solomon en GF(2^8^) |
-| `httpx` | Cliente HTTP async para comunicación con el servidor |
-| `aiosqlite` | Historial persistente de transferencias en SQLite |
-| `pydantic-settings` | Configuración via `.env` o variables de entorno |
-| `uvicorn` | Servidor ASGI para la API local del agente |
+### Desktop (Electron + agente embebido)
+
+El perfil de escritorio distribuye un ejecutable autocontenido que incluye el shell Electron, la
+SPA React compilada y el agente Python congelado. No requiere Python, Node.js ni ninguna
+dependencia preinstalada en el dispositivo del usuario final. Los artefactos generados son:
+`.AppImage` en Linux, instalador NSIS `.exe` en Windows y `.dmg` en macOS.
+
+### Servidor (Docker Compose)
+
+El servidor central se despliega como un conjunto de contenedores coordinados por Docker Compose:
+el proceso de la API (Python + FastAPI), la base de datos de grafos (Neo4j), la base de datos en
+memoria (Redis) y el proveedor de identidad (Keycloak, opcional). El despliegue completo se inicia
+con un único comando desde el directorio del servidor.
+
+### Nodo headless (Docker o binario)
+
+Los nodos edge e IoT pueden desplegarse como contenedor Docker o como binario autocontenido. En
+ambos casos, la configuración completa se provee mediante variables de entorno: identificador del
+peer, URL del servidor, URL HTTP pública del agente y token de dispositivo. Una vez desplegado, el
+nodo se registra automáticamente, mantiene su presencia y recibe transferencias sin necesidad de
+intervención manual.
+
+## Requisitos de red
+
+El único puerto que requiere apertura en firewalls entre peers es el **9001 UDP** del agente
+receptor. El servidor central solo necesita el puerto **8080 TCP** accesible desde los agentes.
+El puerto 8000 TCP del agente es de uso exclusivamente local (loopback entre el shell Electron y
+el agente Python).
+
+Si existe NAT entre los peers, el puerto 9001 UDP debe ser accesible mediante reenvío de puertos
+o ambos peers deben estar en la misma red (o conectados por VPN). Para entornos sin conectividad
+UDP directa, el sistema de relay provee el mecanismo de fallback descrito en la sección anterior.
+
+El stack de despliegue recomendado para producción combina RockDove con una VPN de nivel 3
+(WireGuard, Tailscale o NetBird): la VPN resuelve la reachability, el traversal de NAT y el
+cifrado a nivel de red, mientras que RockDove se encarga de la resiliencia de datos mediante FEC,
+el descubrimiento de peers y la autenticación.
+
+## Referencia de puertos
+
+| Puerto | Protocolo | Componente | Requerimiento de acceso |
+|---|---|---|---|
+| 8080 | TCP | Servidor central | Accesible desde todos los peers (registro, heartbeat, métricas) |
+| 8000 | TCP | Agente HTTP | Solo loopback local (Electron → agente) |
+| 9001 | UDP | Agente UDP/QUIC | Accesible desde peers emisores (único puerto con requisito en firewall entre peers) |
+| 7687 | TCP (Bolt) | Neo4j | Solo acceso interno desde el servidor |
+| 6379 | TCP | Redis | Solo acceso interno desde el servidor |
+| 8081 | TCP | Keycloak | Accesible desde agentes para validación JWKS (opcional) |
+
+\newpage
+
+# Conclusiones
+
+RockDove implementa una arquitectura de dos planos que refleja una decisión de diseño deliberada:
+separar la coordinación de la transferencia permite que el servidor central sea un componente
+liviano y fácilmente escalable, mientras que el agente local concentra la complejidad del
+procesamiento de datos. El servidor nunca accede al contenido de los archivos, lo que simplifica
+los requisitos de privacidad y conformidad del componente centralizado y permite que la
+transferencia continúe funcionando incluso con conectividad intermitente al servidor.
+
+La elección de UDP como transporte base, complementada con Reed-Solomon como mecanismo de
+corrección de errores, está motivada por los casos de uso de alta latencia y conectividad
+intermitente. A diferencia de TCP, que retransmite automáticamente los segmentos perdidos con el
+consiguiente costo de round-trip, RS permite al receptor reconstruir el archivo original a partir
+de los bloques que llegaron, sin contactar al emisor. El costo es el overhead de los símbolos de
+paridad, que el sistema dimensiona automáticamente según las condiciones de red observadas.
+La redundancia adaptativa cierra el ciclo de retroalimentación: las métricas de las transferencias
+previas alimentan la recomendación de la siguiente, haciendo que el sistema aprenda de las
+condiciones del enlace con el tiempo.

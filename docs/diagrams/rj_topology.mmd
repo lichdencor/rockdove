@@ -1,0 +1,21 @@
+flowchart TB
+  subgraph NULL[" "]
+    direction TB
+    S["🏷️ Servidor Central<br/>Coordinación + IA (Jev)"]:::server
+  end
+
+  S --- A["🅰️ Peer A<br/>Emisor locale"]
+  S --- B["🅱️ Peer B<br/>Relay (30 km)"]
+  S --- C["🅲 Peer C<br/>Destino (wifi pobre)"]
+
+  A --- B
+  B --- C
+  A -. "UDP directo (frágil o no disponible)" .- C
+
+  S -. "métricas" .- A
+  S -. "métricas" .- B
+  S -. "métricas" .- C
+
+  classDef server fill:#0b3d78,stroke:#0b3d78,color:#fff,font-weight:700
+  classDef peer fill:#e8f4fd,stroke:#2196F3
+  class A,B,C peer

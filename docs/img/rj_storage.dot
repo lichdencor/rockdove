@@ -1,0 +1,31 @@
+digraph Storage {
+  graph [rankdir=LR, bgcolor="transparent", fontname="DejaVu Sans", nodesep=0.5, ranksep=0.7];
+  node [style=filled, fontname="DejaVu Sans"];
+  edge [fontname="DejaVu Sans", fontsize=9];
+
+  agente [shape=box, label="Agente (peer)\nsondea la red", fillcolor="#e8f4fd", color="#2196F3"];
+
+  subgraph cluster_server {
+    label="Servidor Central"; labelloc=t; fontname="DejaVu Sans";
+    style=filled; color="#e0e0e0"; fillcolor="#fafafa";
+    colector [shape=ellipse, label="Colector", fillcolor="#fff3e0", color="#FF9800"];
+    redis [shape=ellipse, label="Redis\nresumen por peer", fillcolor="#fff3e0", color="#FF9800"];
+    neo4j [shape=ellipse, label="Neo4j\ngrafo P2P", fillcolor="#fff3e0", color="#FF9800"];
+  }
+
+  subgraph cluster_ai {
+    label="Capa de decisión (Jev)"; labelloc=t; fontname="DejaVu Sans";
+    style=filled; color="#d1c4e9"; fillcolor="#fbf7ff";
+    decisor [shape=box, label="Decisor", fillcolor="#f3e8ff", color="#7c3aed", fontcolor="#3b0764"];
+    jev [shape=box, label="Jev (System One)", fillcolor="#f3e8ff", color="#7c3aed", fontcolor="#3b0764"];
+  }
+
+  agente -> colector [label="POST /metrics/report"];
+  colector -> redis;
+  colector -> neo4j;
+  redis -> decisor [label="promedio"];
+  neo4j -> decisor [label="métricas del vínculo (CONNECTS_TO)"];
+  decisor -> jev [label="state + preguntas tipadas"];
+  jev -> destino [label="decisión + probabilidades"];
+  destino [shape=box, label="Peer destino\nruta elegida", fillcolor="#e8f4fd", color="#2196F3", style=""];
+}

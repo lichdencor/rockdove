@@ -1,0 +1,36 @@
+digraph AI {
+  graph [rankdir=LR, bgcolor="transparent", fontname="DejaVu Sans", nodesep=0.4, ranksep=0.7];
+  node [style=filled, fontname="DejaVu Sans"];
+  edge [fontname="DejaVu Sans", fontsize=9];
+
+  ent [shape=box, label="Entrada\nstate + preguntas tipadas", fillcolor="#f5f7fa", color="#90a4ae"];
+
+  subgraph cluster_lm {
+    label="Modelo base (decoder)\nuna pasada paralela"; labelloc=t; fontname="DejaVu Sans";
+    style=filled; color="#b0bec5"; fillcolor="#f5f7fa";
+    h1 [shape=box, label="repr pregunta 1"];
+    h2 [shape=box, label="repr pregunta 2"];
+    h3 [shape=box, label="repr pregunta 3"];
+    hop [shape=box, label="repr de opciones"];
+  }
+
+  subgraph cluster_ph {
+    label="Pointer head"; labelloc=t; fontname="DejaVu Sans";
+    style=filled; color="#ffcc80"; fillcolor="#fff3e0";
+    sc [shape=box, label="score(decisión, opciones)"];
+    soft [shape=box, label="softmax → P(opción)"];
+  }
+
+  subgraph cluster_out {
+    label="Salida tipada (paralela)"; labelloc=t; fontname="DejaVu Sans";
+    style=filled; color="#a5d6a7"; fillcolor="#e6f7e6";
+    r1 [shape=box, label="redundancy_band (score)"];
+    r2 [shape=box, label="should_relay (prob.)"];
+    r3 [shape=box, label="relay_target (choice)"];
+  }
+
+  ent -> h1; ent -> h2; ent -> h3; ent -> hop;
+  h1 -> sc; h2 -> sc; h3 -> sc; hop -> sc;
+  sc -> soft;
+  soft -> r1; soft -> r2; soft -> r3;
+}

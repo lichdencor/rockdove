@@ -8,13 +8,14 @@ dependencies = [
     "pydantic-settings==2.7.0",
     "redis[asyncio]>=5.2",
     "PyJWT[crypto]>=2.8",
+    "neo4j>=5.0",
+    "httpx>=0.28.1",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
-    "httpx>=0.28",
 ]
 
 [tool.pytest.ini_options]

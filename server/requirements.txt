@@ -4,8 +4,13 @@ annotated-types==0.7.0
     # via pydantic
 anyio==4.13.0
     # via
+    #   httpx
     #   starlette
     #   watchfiles
+certifi==2026.5.20
+    # via
+    #   httpcore
+    #   httpx
 cffi==2.0.0 ; platform_python_implementation != 'PyPy'
     # via cryptography
 click==8.4.1
@@ -19,11 +24,21 @@ cryptography==48.0.0
 fastapi==0.115.6
     # via rs-server
 h11==0.16.0
-    # via uvicorn
+    # via
+    #   httpcore
+    #   uvicorn
+httpcore==1.0.9
+    # via httpx
 httptools==0.7.1
     # via uvicorn
+httpx==0.28.1
+    # via rs-server
 idna==3.16
-    # via anyio
+    # via
+    #   anyio
+    #   httpx
+neo4j==6.2.0
+    # via rs-server
 pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
     # via cffi
 pydantic==2.13.4
@@ -40,6 +55,8 @@ python-dotenv==1.2.2
     # via
     #   pydantic-settings
     #   uvicorn
+pytz==2026.2
+    # via neo4j
 pyyaml==6.0.3
     # via uvicorn
 redis==7.4.0

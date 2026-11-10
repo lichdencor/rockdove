@@ -80,3 +80,13 @@ async def test_404_on_missing_download(client):
 
 async def test_404_on_missing_delete(client):
     assert (await client.delete("/files/nonexistent")).status_code == 404
+
+
+async def test_upload_over_limit_is_rejected(client, monkeypatch):
+    monkeypatch.setenv("MAX_UPLOAD_BYTES", "10")
+    from config import get_settings
+    get_settings.cache_clear()
+    r = await client.post("/files", files={"file": ("big.bin", b"x" * 11, "application/octet-stream")})
+    assert r.status_code == 413
+    ok = await client.post("/files", files={"file": ("ok.bin", b"x" * 10, "application/octet-stream")})
+    assert ok.status_code == 200

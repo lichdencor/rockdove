@@ -11,7 +11,9 @@ OIDC mode (OIDC_ENABLED=True):
                              (falls back to "dev" when OIDC_ISSUER not set).
 """
 import jwt
-from fastapi import Header, HTTPException
+import logging
+
+from fastapi import Header, HTTPException, Request
 
 from config import get_settings
 from device_tokens.store import validate as validate_device_token
@@ -35,8 +37,23 @@ class CallerInfo:
 
 
 async def extract_auth(
+    request: Request,
     authorization: str | None = Header(default=None),
 ) -> CallerInfo:
+    try:
+        caller = await _resolve_caller(authorization)
+    except HTTPException as exc:
+        logging.getLogger("auth").warning(
+            "auth_denied",
+            extra={"client_ip": request.client.host if request.client else None,
+                   "path": request.url.path, "detail": exc.detail},
+        )
+        raise
+    request.state.user = caller.peer_id or ("service" if caller.is_service else None)
+    return caller
+
+
+async def _resolve_caller(authorization: str | None) -> CallerInfo:
     settings = get_settings()
 
     if not settings.OIDC_ENABLED:
@@ -64,8 +81,9 @@ async def extract_auth(
     # OIDC JWT (human users via Keycloak)
     try:
         payload = verify_token(token)
+        peer_id = payload.get("preferred_username") or payload.get("sub")
         return CallerInfo(
-            peer_id=payload.get("sub"),
+            peer_id=peer_id,
             is_service=False,
             org_id=org_id_from_issuer(payload.get("iss", "")),
             groups=groups_from_payload(payload),

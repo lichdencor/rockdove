@@ -38,9 +38,13 @@ export default function TransferDialog({ peer, preselectedFile, serverUrl, peerI
   const [adaptive, setAdaptive] = useState(true);
   const [redundancy, setRedundancy] = useState(0.25);
   const [userOverride, setUserOverride] = useState(false);
+  const [transport, setTransport] = useState<"udp" | "quic">(peer.transport ?? "udp");
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<TransferResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [requestingTransport, setRequestingTransport] = useState(false);
+  const [transportRequestSent, setTransportRequestSent] = useState(false);
+  const [transportRequestError, setTransportRequestError] = useState<string | null>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
 
   // Load files
@@ -66,7 +70,7 @@ export default function TransferDialog({ peer, preselectedFile, serverUrl, peerI
     try {
       // adaptive=true → null means "let the server decide" (agent uses its own recommendation call)
       const level = adaptive ? undefined : redundancy;
-      const res = await agentApi.sendFile(selectedFile.file_id, peer.peer_id, level);
+      const res = await agentApi.sendFile(selectedFile.file_id, peer.peer_id, level, transport);
       setResult(res);
     } catch (e) {
       setError((e as Error).message);
@@ -84,6 +88,19 @@ export default function TransferDialog({ peer, preselectedFile, serverUrl, peerI
     if (recommendation) {
       setRedundancy(recommendation.redundancy_level);
       setUserOverride(false);
+    }
+  }
+
+  async function handleRequestTransport() {
+    setRequestingTransport(true);
+    setTransportRequestError(null);
+    try {
+      await agentApi.requestTransport(peer.peer_id, transport);
+      setTransportRequestSent(true);
+    } catch (e) {
+      setTransportRequestError((e as Error).message);
+    } finally {
+      setRequestingTransport(false);
     }
   }
 
@@ -126,14 +143,22 @@ export default function TransferDialog({ peer, preselectedFile, serverUrl, peerI
                 {result.status}
               </p>
               {result.status === "degraded" && (
-                <p className="text-xs text-slate-400 mt-1">
-                  RS recuperó {result.recovered_blocks}/{result.total_blocks} bloques
-                </p>
+                <>
+                  <p className="text-xs text-slate-400 mt-1">
+                    RS recuperó {result.recovered_blocks}/{result.total_blocks} bloques
+                  </p>
+                  <div className="mt-3 flex items-start gap-2 bg-yellow-950/30 border border-yellow-800/50 rounded-lg px-3 py-2.5 text-xs text-yellow-300 text-left">
+                    <span className="flex-shrink-0">⚠️</span>
+                    <span>
+                      Fue exitoso — RS recuperó {result.recovered_blocks}/{result.total_blocks} bloques
+                    </span>
+                  </div>
+                </>
               )}
               {result.reason && (
                 <p className="text-xs text-slate-500 mt-1">{result.reason}</p>
               )}
-              <button
+              <button data-testid="transfer-close-result"
                 onClick={() => onComplete(result)}
                 className="bird-btn mt-5 bg-brand-600 hover:bg-brand-700 text-white rounded-lg px-6 py-2 text-sm transition-colors"
               >
@@ -148,7 +173,7 @@ export default function TransferDialog({ peer, preselectedFile, serverUrl, peerI
                 {files.length === 0 ? (
                   <p className="text-xs text-slate-500">No hay archivos locales. Subí uno primero.</p>
                 ) : (
-                  <select
+                  <select data-testid="transfer-file-select"
                     value={selectedFile?.file_id ?? ""}
                     onChange={(e) => setSelectedFile(files.find((f) => f.file_id === e.target.value) ?? null)}
                     className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500"
@@ -161,6 +186,93 @@ export default function TransferDialog({ peer, preselectedFile, serverUrl, peerI
                     ))}
                   </select>
                 )}
+              </div>
+
+              {/* ── Transport ── */}
+              <div>
+                <label className="block text-xs text-slate-400 mb-2">Transport</label>
+                <div className="flex gap-2">
+                  {(["udp", "quic"] as const).map((t) => {
+                    const peerTransport = peer.transport ?? "udp";
+                    const isRegistered = peerTransport === t;
+                    const isSelected = transport === t;
+                    return (
+                      <button data-testid={`transfer-transport-${t}`}
+                        key={t}
+                        type="button"
+                        onClick={() => {
+                          setTransport(t);
+                          setTransportRequestSent(false);
+                          setTransportRequestError(null);
+                        }}
+                        className={`flex-1 py-2 text-xs font-mono rounded-lg border transition-colors cursor-pointer ${
+                          isSelected
+                            ? t === "quic"
+                              ? "bg-violet-900/60 border-violet-700 text-violet-300"
+                              : "bg-slate-700 border-slate-600 text-slate-200"
+                            : "bg-slate-800/40 border-slate-700/50 text-slate-500 hover:text-slate-300 hover:border-slate-600"
+                        }`}
+                      >
+                        {t.toUpperCase()}
+                        {isRegistered ? (
+                          <span className="ml-1 text-slate-500 font-sans normal-case">✓</span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Mismatch warning */}
+                {transport !== (peer.transport ?? "udp") ? (
+                  <div className="mt-2 bg-amber-950/30 border border-amber-800/50 rounded-lg px-3 py-2 text-xs text-amber-400 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <svg className="w-3.5 h-3.5 flex-shrink-0 mt-px" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                        <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                      </svg>
+                      {transportRequestSent ? (
+                        <span className="text-amber-300">
+                          Solicitud enviada — esperá que el peer acepte.
+                        </span>
+                      ) : (
+                        <span>
+                          El peer está registrado como <span className="font-mono">{(peer.transport ?? "udp").toUpperCase()}</span>.
+                          Para usar {transport.toUpperCase()}, el agente remoto debe iniciarse con{" "}
+                          <code className="text-amber-300">TRANSPORT_MODE={transport}</code>.
+                        </span>
+                      )}
+                    </div>
+                    {transportRequestError ? (
+                      <p className="text-red-400">{transportRequestError}</p>
+                    ) : null}
+                    {!transportRequestSent ? (
+                      <button data-testid="transfer-request-transport"
+                        type="button"
+                        onClick={handleRequestTransport}
+                        disabled={requestingTransport}
+                        className="bg-amber-800/60 hover:bg-amber-700/60 disabled:opacity-40 text-amber-200 border border-amber-700/50 rounded-lg px-3 py-1.5 text-xs transition-colors"
+                      >
+                        {requestingTransport ? "Enviando…" : "Solicitar cambio"}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {/* QUIC info when selected and no mismatch */}
+                {transport === "quic" && transport === (peer.transport ?? "udp") ? (
+                  <div className="mt-2 flex items-start gap-2 bg-violet-950/30 border border-violet-800/50 rounded-lg px-3 py-2.5 text-xs text-violet-300">
+                    <svg className="w-3.5 h-3.5 flex-shrink-0 mt-px" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                    </svg>
+                    <div>
+                      <p className="font-medium mb-0.5">Negociación QUIC/TLS</p>
+                      <p className="text-violet-400/80">
+                        El receptor deberá aprobar tu certificado antes de que los datos se transfieran.
+                        Asegurate de que el peer tenga la app abierta.
+                      </p>
+                    </div>
+                  </div>
+                ) : null}
               </div>
 
               {/* ── Redundancy ── */}
@@ -191,7 +303,7 @@ export default function TransferDialog({ peer, preselectedFile, serverUrl, peerI
                       {adaptive ? "usa la recomendación del servidor" : "manual"}
                     </span>
                   </div>
-                  <button
+                  <button data-testid="transfer-adaptive-toggle"
                     onClick={() => setAdaptive((v) => !v)}
                     className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
                       adaptive ? "bg-brand-600" : "bg-slate-700"
@@ -214,7 +326,7 @@ export default function TransferDialog({ peer, preselectedFile, serverUrl, peerI
                     </div>
                     {userOverride && recommendation && (
                       <div className="flex justify-end mb-2">
-                        <button
+                        <button data-testid="transfer-reset-recommendation"
                           onClick={handleResetRecommendation}
                           className="text-xs text-slate-500 underline hover:text-slate-300"
                         >
@@ -222,7 +334,7 @@ export default function TransferDialog({ peer, preselectedFile, serverUrl, peerI
                         </button>
                       </div>
                     )}
-                    <input
+                    <input data-testid="transfer-redundancy-slider"
                       type="range"
                       min={5} max={50} step={1}
                       value={Math.round(redundancy * 100)}
@@ -247,14 +359,14 @@ export default function TransferDialog({ peer, preselectedFile, serverUrl, peerI
 
               {/* Actions */}
               <div className="flex gap-3 pt-1">
-                <button
+                <button data-testid="transfer-cancel"
                   onClick={onClose}
                   disabled={sending}
                   className="flex-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 rounded-lg py-2.5 text-sm transition-colors"
                 >
                   Cancelar
                 </button>
-                <button
+                <button data-testid="transfer-send"
                   onClick={handleSend}
                   disabled={sending || !selectedFile}
                   className="bird-btn flex-1 bg-brand-600 hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg py-2.5 text-sm font-medium transition-colors"

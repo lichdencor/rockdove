@@ -1,0 +1,109 @@
+# Self-contained test lab: server + Redis + Neo4j + two agents (+ Keycloak and loss proxy via profiles).
+# Usage: see test/README.md. Runs rootless; no tc/netem, no host .env needed.
+name: rockdove-test
+
+x-agent: &agent
+  build: ../client/agent
+  restart: "no"
+  environment: &agent-env
+    SERVER_URL: http://server:8080
+    AGENT_SERVICE_TOKEN: ${TEST_SERVICE_TOKEN:-test-service-token}
+    STORAGE_PATH: /data
+    LOG_FORMAT: json
+  depends_on:
+    server: { condition: service_healthy }
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+    interval: 5s
+    timeout: 3s
+    retries: 10
+
+services:
+  redis:
+    image: redis:7-alpine
+
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: neo4j/password123
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "password123", "RETURN 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  keycloak:
+    profiles: [auth]
+    image: quay.io/keycloak/keycloak:24.0
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    volumes:
+      - ../server/keycloak:/opt/keycloak/data/import:ro
+    ports:
+      - "${TEST_KEYCLOAK_PORT:-18081}:8080"
+
+  server:
+    build: ../server
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password123
+      OIDC_ENABLED: ${TEST_OIDC_ENABLED:-false}
+      OIDC_ISSUER: http://localhost:${TEST_KEYCLOAK_PORT:-18081}/realms/rockdove
+      OIDC_KEYCLOAK_URL: http://keycloak:8080
+      OIDC_CLIENT_ID: rockdove-client
+      AGENT_SERVICE_TOKEN: ${TEST_SERVICE_TOKEN:-test-service-token}
+      LOG_FORMAT: json
+    ports:
+      - "${TEST_SERVER_PORT:-18080}:8080"
+    depends_on:
+      redis: { condition: service_started }
+      neo4j: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  agent-a:
+    <<: *agent
+    environment:
+      <<: *agent-env
+      PEER_ID: rd-a
+      AGENT_API_URL: http://agent-a:8000
+      UDP_ADVERTISE_HOST: agent-a
+    ports:
+      - "${TEST_AGENT_A_PORT:-18001}:8000"
+    volumes:
+      - agent_a_data:/data
+
+  # With TEST_AGENT_B_UDP_HOST=udp-proxy (profile loss), datagrams sent to rd-b cross the impairment proxy.
+  agent-b:
+    <<: *agent
+    environment:
+      <<: *agent-env
+      PEER_ID: rd-b
+      AGENT_API_URL: http://agent-b:8000
+      UDP_ADVERTISE_HOST: ${TEST_AGENT_B_UDP_HOST:-agent-b}
+    ports:
+      - "${TEST_AGENT_B_PORT:-18002}:8000"
+    volumes:
+      - agent_b_data:/data
+
+  udp-proxy:
+    profiles: [loss]
+    image: python:3.12-slim
+    command: >
+      python /udp_proxy.py --listen-port 9001 --target-host agent-b --target-port 9001
+      --loss-pct ${TEST_LOSS_PCT:-0} --delay-ms ${TEST_DELAY_MS:-0}
+    volumes:
+      - ./udp_proxy.py:/udp_proxy.py:ro
+    ports:
+      - "${TEST_PROXY_CONTROL_PORT:-18300}:9300"
+
+volumes:
+  agent_a_data:
+  agent_b_data:

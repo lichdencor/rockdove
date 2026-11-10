@@ -2,6 +2,19 @@
 informes/
 docs/informes/
 
+# Entregables binarios / documentos de cursada
+*.xlsx
+*.docx
+*:Zone.Identifier
+
+# Mocks locales de bajo valor
+client/agent/run/
+
+# Secrets / entornos locales
+.env
+.env.*
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]

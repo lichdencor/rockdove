@@ -1,6 +1,7 @@
 """
-Tests for auto-IP detection in config.py (P0.3).
+Tests for auto-IP detection and settings validation in config.py.
 """
+import pytest
 
 
 def test_agent_api_url_auto_detected_when_empty(monkeypatch):
@@ -40,3 +41,26 @@ def test_defaults(monkeypatch):
     assert s.AGENT_PORT == 8000
     assert s.UDP_PORT == 9001
     assert s.PEER_ID == "default-peer"
+
+
+def test_transport_mode_defaults_to_udp(monkeypatch):
+    monkeypatch.delenv("TRANSPORT_MODE", raising=False)
+    from config import get_settings
+    get_settings.cache_clear()
+    assert get_settings().TRANSPORT_MODE == "udp"
+
+
+def test_transport_mode_quic_accepted(monkeypatch):
+    monkeypatch.setenv("TRANSPORT_MODE", "quic")
+    from config import get_settings
+    get_settings.cache_clear()
+    assert get_settings().TRANSPORT_MODE == "quic"
+
+
+def test_transport_mode_invalid_raises(monkeypatch):
+    import pydantic
+    monkeypatch.setenv("TRANSPORT_MODE", "tcp")
+    from config import get_settings
+    get_settings.cache_clear()
+    with pytest.raises((pydantic.ValidationError, Exception)):
+        get_settings()

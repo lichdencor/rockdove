@@ -15,4 +15,15 @@ contextBridge.exposeInMainWorld("rsAgent", {
   onLog: (callback: (msg: string) => void) => {
     ipcRenderer.on("oidc-log", (_event, msg) => callback(msg));
   },
+  winMinimize: () => ipcRenderer.send("win-minimize"),
+  winMaximize: () => ipcRenderer.send("win-maximize"),
+  winClose: () => ipcRenderer.send("win-close"),
+  onMaximizeChange: (callback: (isMaximized: boolean) => void) => {
+    ipcRenderer.removeAllListeners("win-maximized");
+    ipcRenderer.on("win-maximized", (_event, v: boolean) => callback(v));
+  },
+  getLoginItemEnabled: (): Promise<boolean> =>
+    ipcRenderer.invoke("get-login-item"),
+  setLoginItemEnabled: (enabled: boolean): Promise<void> =>
+    ipcRenderer.invoke("set-login-item", enabled),
 });

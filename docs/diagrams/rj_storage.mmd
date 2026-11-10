@@ -1,0 +1,31 @@
+flowchart LR
+  subgraph Client["Agente (peer)"]
+    direction TB
+    M["Sondea la red<br/>rtt · jitter · pérdida"]
+    M -->|"POST /metrics/report"| SRV
+  end
+
+  subgraph Server["Servidor Central"]
+    direction TB
+    SRC["Colector"]:::sv
+    NG["Grafo Neo4j<br/>(nodos Peer + aristas CONNECTS_TO)"]:::sv
+    RDS["Redis<br/>(resumen por peer)"]:::sv
+    SRC --> NG
+    SRC --> RDS
+  end
+
+  subgraph AI["Capa de decisión Jev"]
+    direction TB
+    JS["Jev (System One)"]:::ai
+    DJ["Decisor<br/>arma state + preguntas tipadas"]:::ai
+    DJ --> JS
+  end
+
+  C2["Peer destino"]:::co
+  NG -->|"lee métricas del vínculo"| DJ
+  RDS -->|"lee promedio"| DJ
+  JS -->|"redundancy_band · should_relay · relay_target"| C2
+
+  classDef sv fill:#fff3e0,stroke:#FF9800
+  classDef ai fill:#f3e8ff,stroke:#7c3aed,color:#3b0764
+  classDef co fill:#e8f4fd,stroke:#2196F3

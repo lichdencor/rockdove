@@ -1,48 +1,163 @@
+%% RockDove — Arquitectura General — Planos de Control y Datos
 graph TB
-  subgraph cloud["☁️ Servidor Central — Plano de Control"]
+  subgraph cloud["Servidor de Coordinación — Plano de Control (Nube)"]
     direction LR
-    PR["Peer Registry\nPOST /peers/register\nPOST /peers/{id}/heartbeat\nGET /peers/{id}"]
-    WS["WebSocket Push\nGET /peers/watch\nbroadcast en cada\nregistro / heartbeat"]
-    MR["Métricas + Recomendador\nPOST /metrics/report\nGET /metrics/recommendation/{id}"]
-    DT["Device Tokens\nPOST /device-tokens\nDELETE /device-tokens/{id}"]
-    KC["Keycloak\nOIDC / SSO\npuerto 8081"]
-    RD[("Redis\npeers con TTL\nmétricas últimas 10")]
-    PR --- WS
-    PR --> RD
-    MR --> RD
-    DT --> RD
-    PR -.->|"valida JWT"| KC
+
+    subgraph api["API FastAPI :8080"]
+      RP["Registro de Peers
+      POST /peers/register
+      POST /peers/{id}/heartbeat
+      GET /peers/{id}"]
+      WS["WebSocket Push
+      GET /peers/watch
+      difunde cambios en tiempo real"]
+      MM["Motor de Métricas
+      POST /metrics/report
+      GET /metrics/recommendation/{id}
+      calidad → redundancia 5%–50%"]
+      MR["Motor de Relay
+      GET /relay/find/{target_id}
+      filtra por etiqueta de relay"]
+      CA["Control de Acceso
+      valida JWT · device tokens
+      scopes de grupo · INCOMING_POLICY"]
+      RP --- WS
+      RP --- CA
+      MM --- CA
+      MR --- CA
+    end
+
+    NEO[("Grafo de Red
+    Neo4j
+    Nodos: peers con
+    udp_host · api_url · relay_tags
+    Aristas: CONNECTS_TO
+    pesos RTT · jitter · loss")]
+
+    RED[("Estado Compartido
+    Redis
+    Métricas: ring buffer 10 muestras
+    Device tokens (rd_...)
+    Org scopes · peers TTL")]
+
+    KC["Keycloak
+    OIDC / SSO / PKCE
+    Realms por organización
+    JWKS endpoint"]
+
+    api -->|"lectura / escritura de peers
+    y pesos de red"| NEO
+    api -->|"lectura / escritura de métricas
+    tokens y scopes"| RED
+    CA -.->|"validación JWT via JWKS"| KC
   end
 
-  subgraph peerA["💻 Peer A — RockDove Desktop"]
+  subgraph desktop["Peer Desktop — RockDove Instalado"]
     direction TB
-    UIA["React UI\n(ConnectPage / Dashboard)"]
-    AgentA["Python Agent :8000\nRS engine · storage SQLite\nUDP :9001"]
-    UIA -->|"HTTP 127.0.0.1:8000"| AgentA
+
+    EL["Shell Electron
+    lanza agente Python
+    expone URL via contextBridge"]
+
+    UI["Interfaz React
+    ConnectPage · Dashboard
+    ConfigTab · FileTransfer
+    Historial · Configuración de transporte"]
+
+    subgraph agentA["Agente Local — Python/FastAPI :8000"]
+      RS_A["Motor Reed-Solomon
+      split → encode → SHA-256
+      decode con recuperación por borrado"]
+      TR_A["Capa de Transporte
+      UDP asyncio raw socket
+      QUIC TLS 1.3 + DATAGRAM
+      cambio en tiempo de ejecución"]
+      GA_A["Gestor de Almacenamiento
+      escribe archivos recibidos
+      índice SHA-256 · historial SQLite"]
+      SD_A["Daemon del Sistema
+      systemd user unit (Linux)
+      LaunchAgent plist (macOS)
+      tarea ONLOGON (Windows)"]
+    end
+
+    EL -->|"lanza"| agentA
+    EL -->|"carga"| UI
+    UI -->|"HTTP 127.0.0.1:8000"| agentA
   end
 
-  subgraph peerB["💻 Peer B — RockDove Desktop"]
+  subgraph edge["Nodo Edge / IoT — Docker Headless"]
     direction TB
-    UIB["React UI"]
-    AgentB["Python Agent :8000\nRS engine · storage SQLite\nUDP :9001"]
-    UIB -->|"HTTP 127.0.0.1:8000"| AgentB
+
+    subgraph agentE["Agente Local — Python/FastAPI :8000"]
+      RS_E["Motor Reed-Solomon"]
+      TR_E["Capa de Transporte UDP / QUIC"]
+      SD_E["Daemon del Sistema
+      contenedor Docker
+      reinicio automático"]
+    end
+
+    DT["Autenticación
+    Device Token rd_...
+    (256 bits, sin UI)"]
+    DT --- agentE
   end
 
-  subgraph edge["🔧 Nodo Edge — Docker headless"]
-    AgentE["Python Agent\nUDP :9001\nDevice Token auth"]
+  subgraph relay["Peer Relay — relay_capable = true"]
+    direction TB
+
+    subgraph agentR["Agente Local — Python/FastAPI :8000"]
+      TR_R["Capa de Transporte UDP / QUIC"]
+      PR_R["Procesador de Relay
+      almacena bloques en RAM
+      nunca escribe en disco
+      etiquetas: ephemeral · restricted · gateway"]
+      SD_R["Daemon del Sistema"]
+    end
+
+    NOTE_R["Modo Gateway (opcional)
+    rutas estáticas configuradas
+    sin necesidad de TCP al servidor"]
+    NOTE_R -.- agentR
   end
 
-  AgentA <-->|"HTTPS — registro / heartbeat / peer lookup / métricas"| PR
-  AgentB <-->|"HTTPS — registro / heartbeat / peer lookup / métricas"| PR
-  AgentE <-->|"HTTPS — registro / heartbeat\n(Bearer: device token)"| PR
+  agentA -->|"HTTPS — registro / heartbeat
+  peer lookup · relay lookup
+  reporte de métricas"| api
+  agentE -->|"HTTPS — registro / heartbeat
+  Bearer: device token"| api
+  agentR -->|"HTTPS — registro / heartbeat
+  relay_capable=true en registro"| api
 
-  UIA <-.->|"WebSocket — push en tiempo real"| WS
-  UIB <-.->|"WebSocket"| WS
+  UI <-.->|"WebSocket — push de lista de peers
+  notificaciones en tiempo real"| WS
 
-  AgentA <-->|"UDP directo — bloques Reed-Solomon\n🔒 los archivos NUNCA pasan por el servidor"| AgentB
-  AgentA -.->|"UDP directo"| AgentE
+  agentA <-->|"UDP / QUIC directo
+  bloques Reed-Solomon
+  Los archivos NUNCA pasan por el servidor"| agentE
+
+  agentA -.->|"UDP / QUIC directo
+  (ruta primaria cuando hay conectividad)"| agentR
+
+  agentR -.->|"UDP / QUIC relay
+  (reenvío en RAM al peer destino)"| agentE
+
+  note_data["Los archivos viajan SOLO entre agentes
+  por UDP / QUIC directo o relay
+  El servidor gestiona SOLO metadatos de control"]
 
   style cloud fill:#fff8e1,stroke:#f59e0b,color:#000
-  style peerA fill:#eff6ff,stroke:#3b82f6,color:#000
-  style peerB fill:#f0fdf4,stroke:#22c55e,color:#000
-  style edge fill:#faf5ff,stroke:#a855f7,color:#000
+  style api fill:#fef3c7,stroke:#d97706,color:#000
+  style desktop fill:#eff6ff,stroke:#3b82f6,color:#000
+  style agentA fill:#dbeafe,stroke:#1d4ed8,color:#000
+  style edge fill:#f0fdf4,stroke:#22c55e,color:#000
+  style agentE fill:#dcfce7,stroke:#16a34a,color:#000
+  style relay fill:#faf5ff,stroke:#a855f7,color:#000
+  style agentR fill:#f3e8ff,stroke:#9333ea,color:#000
+  style NEO fill:#fef9c3,stroke:#b45309,color:#000
+  style RED fill:#fee2e2,stroke:#dc2626,color:#000
+  style KC fill:#fef9c3,stroke:#ca8a04,color:#000
+  style EL fill:#c7d2fe,stroke:#4f46e5,color:#000
+  style UI fill:#bfdbfe,stroke:#1d4ed8,color:#000
+  style note_data fill:#f1f5f9,stroke:#94a3b8,color:#475569
+  style NOTE_R fill:#fdf4ff,stroke:#c084fc,color:#000

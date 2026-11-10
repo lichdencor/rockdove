@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FileMetadata, PeerInfo } from "../types";
-import { agentApi } from "../api";
-import bird3 from "../assets/bird-3.png";
+import { agentApi, getAgentUrl } from "../api";
 
 interface Props {
   peers: PeerInfo[];
@@ -68,18 +67,18 @@ export default function FileList({ peers, onSend }: Props) {
   const onlinepeers = peers.filter((p) => p.online);
 
   return (
-    <div className="bird-panel rounded-xl overflow-hidden h-full flex flex-col">
+    <div className="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden h-full flex flex-col">
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
-        <h2 className="font-medium text-slate-200">Mis archivos</h2>
-        <button
+        <h2 className="text-sm font-medium text-slate-200">Mis archivos</h2>
+        <button data-testid="file-upload-button"
           onClick={() => inputRef.current?.click()}
           disabled={uploading}
-          className="bird-btn flex items-center gap-1.5 text-sm bg-brand-600 hover:bg-brand-700 disabled:opacity-40 text-white rounded-lg px-3 py-1.5 transition-colors"
+          className="flex items-center gap-1.5 text-xs bg-brand-600 hover:bg-brand-700 disabled:opacity-40 text-white rounded-lg px-3 py-1.5 transition-colors"
         >
           <span>+</span>
           {uploading ? "Subiendo…" : "Subir"}
         </button>
-        <input
+        <input data-testid="file-upload-input"
           ref={inputRef}
           type="file"
           className="hidden"
@@ -102,20 +101,15 @@ export default function FileList({ peers, onSend }: Props) {
 
         {files.length === 0 ? (
           <div className="px-4 py-10 text-center text-slate-600 text-sm">
-            <img
-              src={bird3}
-              alt=""
-              className="h-9 w-9 mx-auto mb-3 object-contain animate-bird-bob opacity-50"
-              style={{ animationDelay: "0.5s" }}
-            />
-            <p className="animate-gentle-pulse">Arrastrá archivos o usá el botón Subir</p>
+            <div className="text-3xl mb-2">📁</div>
+            Arrastrá archivos o usá el botón Subir
           </div>
         ) : (
           <ul className="divide-y divide-slate-800/50">
             {files.map((file) => (
               <li key={file.file_id} className="flex items-center gap-3 px-4 py-3 hover:bg-slate-800/40 group transition-colors">
                 <div className="flex-1 min-w-0">
-                  <p className="text-base text-slate-200 truncate">{file.filename}</p>
+                  <p className="text-sm text-slate-200 truncate">{file.filename}</p>
                   <p className="text-xs text-slate-500 mt-0.5 font-mono">
                     {formatBytes(file.size)}
                   </p>
@@ -124,14 +118,14 @@ export default function FileList({ peers, onSend }: Props) {
                 <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                   {onlinepeers.length > 0 ? (
                     onlinepeers.length === 1 ? (
-                      <button
+                      <button data-testid={`file-send-quick-${file.file_id}`}
                         onClick={() => onSend(file, onlinepeers[0])}
                         className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 rounded-lg px-2.5 py-1 transition-colors"
                       >
                         Enviar
                       </button>
                     ) : (
-                      <button
+                      <button data-testid={`file-send-${file.file_id}`}
                         onClick={() => onSend(file)}
                         className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 rounded-lg px-2.5 py-1 transition-colors"
                       >
@@ -139,7 +133,15 @@ export default function FileList({ peers, onSend }: Props) {
                       </button>
                     )
                   ) : null}
-                  <button
+                  <a
+                    href={`${getAgentUrl()}/files/${file.file_id}`}
+                    download={file.filename}
+                    className="text-xs text-slate-600 hover:text-slate-300 transition-colors px-1"
+                    title="Descargar"
+                  >
+                    ↓
+                  </a>
+                  <button data-testid={`file-delete-${file.file_id}`}
                     onClick={() => deleteFile(file.file_id)}
                     className="text-xs text-slate-600 hover:text-red-400 transition-colors px-1"
                     title="Eliminar"
