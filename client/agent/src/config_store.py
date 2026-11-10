@@ -15,6 +15,9 @@ _KNOWN_KEYS: frozenset[str] = frozenset({
     "storage_path",
     "invite_token",
     "network_hint",
+    "incoming_policy",
+    "incoming_allowed_peers",
+    "incoming_denied_peers",
 })
 
 _store: dict = {}
