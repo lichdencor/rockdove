@@ -1,3 +1,10 @@
+## [1.2.1](https://github.com/lichdencor/rockdove/compare/v1.2.0...v1.2.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **release:** publish installers to lichdencor/rockdove ([3356350](https://github.com/lichdencor/rockdove/commit/335635082d7a2cb447d963f72e0c177613451962))
+
 # [1.2.0](https://github.com/lichdencor/rockdove/compare/v1.1.0...v1.2.0) (2026-11-10)
 
 
